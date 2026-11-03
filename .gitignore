@@ -1,0 +1,6 @@
+node_modules/
+.env
+data/results.json
+*.log
+tokenizers/*.json
+!tokenizers/README.md

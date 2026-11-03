@@ -1,0 +1,650 @@
+{
+ "generated": "2026-11-03T20:26:44.023Z",
+ "note": "counts = tokens(probe text) without special tokens; observed prompt_tokens = overhead + counts",
+ "references": [
+  {
+   "id": "cl100k",
+   "label": "OpenAI cl100k (GPT-4 / 3.5)",
+   "family": "openai-cl100k",
+   "members": [
+    "cl100k"
+   ]
+  },
+  {
+   "id": "o200k",
+   "label": "OpenAI o200k (GPT-4o / 4.1 / 5 / o-series) ≡ gpt-oss / o200k_harmony",
+   "family": "openai-o200k",
+   "members": [
+    "o200k",
+    "gptoss"
+   ]
+  },
+  {
+   "id": "llama2",
+   "label": "Llama 2 / Mistral-v1 (SentencePiece 32k)",
+   "family": "llama2",
+   "members": [
+    "llama2"
+   ]
+  },
+  {
+   "id": "llama3",
+   "label": "Llama 3.x (tiktoken-style 128k)",
+   "family": "llama3",
+   "members": [
+    "llama3"
+   ]
+  },
+  {
+   "id": "gemma",
+   "label": "Gemma 1/2 (SentencePiece 256k) ≡ Gemini (256k)",
+   "family": "gemma",
+   "members": [
+    "gemma",
+    "gemini"
+   ]
+  },
+  {
+   "id": "gemma3",
+   "label": "Gemma 3 (262k)",
+   "family": "gemma",
+   "members": [
+    "gemma3"
+   ]
+  },
+  {
+   "id": "qwen2_5",
+   "label": "Qwen 2.5 (151k) ≡ Qwen 3 (151k)",
+   "family": "qwen",
+   "members": [
+    "qwen2_5",
+    "qwen3"
+   ]
+  },
+  {
+   "id": "deepseek_v3",
+   "label": "DeepSeek V3/R1 (128k) ≡ DeepSeek V4 (129k)",
+   "family": "deepseek",
+   "members": [
+    "deepseek_v3",
+    "deepseek_v4"
+   ]
+  },
+  {
+   "id": "mistral_nemo",
+   "label": "Mistral Tekken (Nemo / Small 3 / Large 2)",
+   "family": "mistral-tekken",
+   "members": [
+    "mistral_nemo"
+   ]
+  },
+  {
+   "id": "claude",
+   "label": "Claude (legacy 65k, pre-Claude-3)",
+   "family": "claude-legacy",
+   "members": [
+    "claude"
+   ]
+  },
+  {
+   "id": "chatglm3",
+   "label": "ChatGLM3 (64k)",
+   "family": "glm-legacy",
+   "members": [
+    "chatglm3"
+   ]
+  }
+ ],
+ "defaultProbeIds": [
+  "anchor",
+  "emoji",
+  "korean",
+  "cjk_zh",
+  "hindi",
+  "digits60",
+  "digits_sep",
+  "spaces"
+ ],
+ "probes": [
+  {
+   "id": "anchor",
+   "text": "Hi",
+   "why": "Short anchor; pins the chat-template overhead.",
+   "counts": {
+    "cl100k": 1,
+    "o200k": 1,
+    "llama2": 1,
+    "llama3": 1,
+    "gemma": 1,
+    "gemma3": 1,
+    "qwen2_5": 1,
+    "deepseek_v3": 1,
+    "mistral_nemo": 1,
+    "claude": 1,
+    "chatglm3": 1
+   }
+  },
+  {
+   "id": "digits60",
+   "text": "314159265358979323846264338327950288419716939937510582097494",
+   "why": "Digit chunking: 1/token (Llama2, Gemma, Qwen, DeepSeek) vs 3/token (Llama3, GPT-4/4o).",
+   "counts": {
+    "cl100k": 20,
+    "o200k": 20,
+    "llama2": 61,
+    "llama3": 20,
+    "gemma": 60,
+    "gemma3": 60,
+    "qwen2_5": 60,
+    "deepseek_v3": 20,
+    "mistral_nemo": 60,
+    "claude": 26,
+    "chatglm3": 61
+   }
+  },
+  {
+   "id": "digits_sep",
+   "text": "12,345.678 + 9,876,543.21 = 9,888,888.888",
+   "why": "Numbers with separators.",
+   "counts": {
+    "cl100k": 23,
+    "o200k": 23,
+    "llama2": 40,
+    "llama3": 23,
+    "gemma": 39,
+    "gemma3": 39,
+    "qwen2_5": 39,
+    "deepseek_v3": 23,
+    "mistral_nemo": 39,
+    "claude": 21,
+    "chatglm3": 40
+   }
+  },
+  {
+   "id": "spaces",
+   "text": "a                                        b",
+   "why": "Run of spaces: merged into large whitespace tokens by some BPEs.",
+   "counts": {
+    "cl100k": 3,
+    "o200k": 3,
+    "llama2": 5,
+    "llama3": 3,
+    "gemma": 4,
+    "gemma3": 4,
+    "qwen2_5": 3,
+    "deepseek_v3": 3,
+    "mistral_nemo": 3,
+    "claude": 3,
+    "chatglm3": 5
+   }
+  },
+  {
+   "id": "indent_code",
+   "text": "def f(x):\n        if x:\n        if x:\n        if x:\n        if x:\n            return x",
+   "why": "Code indentation whitespace.",
+   "counts": {
+    "cl100k": 23,
+    "o200k": 23,
+    "llama2": 29,
+    "llama3": 23,
+    "gemma": 29,
+    "gemma3": 29,
+    "qwen2_5": 23,
+    "deepseek_v3": 23,
+    "mistral_nemo": 23,
+    "claude": 24,
+    "chatglm3": 29
+   }
+  },
+  {
+   "id": "newlines",
+   "text": "x\n\n\n\n\n\n\n\n\n\n\n\ny",
+   "why": "Newline runs.",
+   "counts": {
+    "cl100k": 3,
+    "o200k": 4,
+    "llama2": 14,
+    "llama3": 3,
+    "gemma": 3,
+    "gemma3": 3,
+    "qwen2_5": 3,
+    "deepseek_v3": 4,
+    "mistral_nemo": 5,
+    "claude": 5,
+    "chatglm3": 14
+   }
+  },
+  {
+   "id": "tabs",
+   "text": "k\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\tv",
+   "why": "Tab runs.",
+   "counts": {
+    "cl100k": 3,
+    "o200k": 3,
+    "llama2": 18,
+    "llama3": 3,
+    "gemma": 3,
+    "gemma3": 3,
+    "qwen2_5": 3,
+    "deepseek_v3": 4,
+    "mistral_nemo": 3,
+    "claude": 5,
+    "chatglm3": 18
+   }
+  },
+  {
+   "id": "cjk_zh",
+   "text": "人工智能模型的分词器决定了文本如何被切分成词元，这是识别模型来源的重要线索。",
+   "why": "Chinese: tiny for Qwen/DeepSeek/GLM, large for Llama2/cl100k.",
+   "counts": {
+    "cl100k": 44,
+    "o200k": 26,
+    "llama2": 39,
+    "llama3": 30,
+    "gemma": 22,
+    "gemma3": 23,
+    "qwen2_5": 22,
+    "deepseek_v3": 21,
+    "mistral_nemo": 33,
+    "claude": 36,
+    "chatglm3": 23
+   }
+  },
+  {
+   "id": "cjk_ja",
+   "text": "東京特許許可局の新しい言語モデルはトークン化の仕組みが独特です。",
+   "why": "Japanese kana+kanji.",
+   "counts": {
+    "cl100k": 40,
+    "o200k": 26,
+    "llama2": 35,
+    "llama3": 26,
+    "gemma": 19,
+    "gemma3": 19,
+    "qwen2_5": 25,
+    "deepseek_v3": 22,
+    "mistral_nemo": 27,
+    "claude": 39,
+    "chatglm3": 30
+   }
+  },
+  {
+   "id": "korean",
+   "text": "대규모 언어 모델의 토크나이저는 서로 다른 방식으로 텍스트를 분할합니다.",
+   "why": "Hangul.",
+   "counts": {
+    "cl100k": 38,
+    "o200k": 25,
+    "llama2": 45,
+    "llama3": 27,
+    "gemma": 27,
+    "gemma3": 22,
+    "qwen2_5": 30,
+    "deepseek_v3": 26,
+    "mistral_nemo": 22,
+    "claude": 42,
+    "chatglm3": 43
+   }
+  },
+  {
+   "id": "russian",
+   "text": "Токенизатор определяет, как текст разбивается на части для нейросети.",
+   "why": "Cyrillic.",
+   "counts": {
+    "cl100k": 27,
+    "o200k": 19,
+    "llama2": 27,
+    "llama3": 20,
+    "gemma": 18,
+    "gemma3": 17,
+    "qwen2_5": 24,
+    "deepseek_v3": 20,
+    "mistral_nemo": 20,
+    "claude": 30,
+    "chatglm3": 29
+   }
+  },
+  {
+   "id": "hindi",
+   "text": "भाषा मॉडल का टोकनाइज़र पाठ को अलग-अलग तरीके से विभाजित करता है।",
+   "why": "Devanagari: very different across vocab sizes.",
+   "counts": {
+    "cl100k": 66,
+    "o200k": 22,
+    "llama2": 68,
+    "llama3": 34,
+    "gemma": 29,
+    "gemma3": 18,
+    "qwen2_5": 59,
+    "deepseek_v3": 39,
+    "mistral_nemo": 30,
+    "claude": 72,
+    "chatglm3": 70
+   }
+  },
+  {
+   "id": "arabic",
+   "text": "يقوم المحلل اللغوي بتقسيم النص إلى رموز بطرق مختلفة.",
+   "why": "Arabic script.",
+   "counts": {
+    "cl100k": 39,
+    "o200k": 18,
+    "llama2": 46,
+    "llama3": 22,
+    "gemma": 18,
+    "gemma3": 17,
+    "qwen2_5": 20,
+    "deepseek_v3": 21,
+    "mistral_nemo": 17,
+    "claude": 44,
+    "chatglm3": 47
+   }
+  },
+  {
+   "id": "thai",
+   "text": "โมเดลภาษาขนาดใหญ่แบ่งข้อความออกเป็นโทเค็นด้วยวิธีที่แตกต่างกัน",
+   "why": "Thai (no spaces).",
+   "counts": {
+    "cl100k": 64,
+    "o200k": 23,
+    "llama2": 63,
+    "llama3": 28,
+    "gemma": 21,
+    "gemma3": 19,
+    "qwen2_5": 32,
+    "deepseek_v3": 23,
+    "mistral_nemo": 33,
+    "claude": 109,
+    "chatglm3": 63
+   }
+  },
+  {
+   "id": "emoji",
+   "text": "🤖🧠🔥🚀🦄🧬🪐🫠🥹🧑‍💻👩‍👩‍👧‍👦🏳️‍🌈",
+   "why": "Emoji incl. ZWJ sequences: byte-fallback differences.",
+   "counts": {
+    "cl100k": 61,
+    "o200k": 45,
+    "llama2": 69,
+    "llama3": 56,
+    "gemma": 23,
+    "gemma3": 23,
+    "qwen2_5": 34,
+    "deepseek_v3": 41,
+    "mistral_nemo": 76,
+    "claude": 54,
+    "chatglm3": 72
+   }
+  },
+  {
+   "id": "math",
+   "text": "∀ε>0 ∃δ>0: |x−a|<δ ⇒ |f(x)−f(a)|<ε ∮∇×𝐁·d𝐀 ≈ ℏω",
+   "why": "Unicode math symbols.",
+   "counts": {
+    "cl100k": 47,
+    "o200k": 44,
+    "llama2": 61,
+    "llama3": 46,
+    "gemma": 40,
+    "gemma3": 41,
+    "qwen2_5": 41,
+    "deepseek_v3": 39,
+    "mistral_nemo": 50,
+    "claude": 47,
+    "chatglm3": 53
+   }
+  },
+  {
+   "id": "rareword",
+   "text": "Pneumonoultramicroscopicsilicovolcanoconiosis antidisestablishmentarianism floccinaucinihilipilification",
+   "why": "Very long rare words.",
+   "counts": {
+    "cl100k": 32,
+    "o200k": 30,
+    "llama2": 36,
+    "llama3": 30,
+    "gemma": 25,
+    "gemma3": 27,
+    "qwen2_5": 32,
+    "deepseek_v3": 30,
+    "mistral_nemo": 30,
+    "claude": 32,
+    "chatglm3": 36
+   }
+  },
+  {
+   "id": "camel",
+   "text": "getUserAccountSettingsFromRemoteConfigurationProviderAsync",
+   "why": "CamelCase identifier.",
+   "counts": {
+    "cl100k": 8,
+    "o200k": 9,
+    "llama2": 9,
+    "llama3": 8,
+    "gemma": 8,
+    "gemma3": 8,
+    "qwen2_5": 8,
+    "deepseek_v3": 9,
+    "mistral_nemo": 9,
+    "claude": 8,
+    "chatglm3": 10
+   }
+  },
+  {
+   "id": "base64",
+   "text": "U3RlYWx0aE1vZGVsVG9rZW5pemVyRmluZ2VycHJpbnQ9PUhlbGxvV29ybGQxMjM0NQ==",
+   "why": "Base64: near-random characters.",
+   "counts": {
+    "cl100k": 54,
+    "o200k": 49,
+    "llama2": 61,
+    "llama3": 54,
+    "gemma": 46,
+    "gemma3": 45,
+    "qwen2_5": 55,
+    "deepseek_v3": 50,
+    "mistral_nemo": 57,
+    "claude": 46,
+    "chatglm3": 62
+   }
+  },
+  {
+   "id": "hex",
+   "text": "0x7f3a9c2be1d04f68a5c3b2e1f0d9c8b7a6e5f4d3c2b1a09f8e7d6c5b4a39281",
+   "why": "Hex string.",
+   "counts": {
+    "cl100k": 58,
+    "o200k": 58,
+    "llama2": 65,
+    "llama3": 58,
+    "gemma": 64,
+    "gemma3": 64,
+    "qwen2_5": 64,
+    "deepseek_v3": 58,
+    "mistral_nemo": 64,
+    "claude": 58,
+    "chatglm3": 65
+   }
+  },
+  {
+   "id": "url",
+   "text": "https://example.com/api/v2/users?id=8472&sort=desc&filter=active#section-3",
+   "why": "URL punctuation.",
+   "counts": {
+    "cl100k": 24,
+    "o200k": 24,
+    "llama2": 31,
+    "llama3": 24,
+    "gemma": 31,
+    "gemma3": 31,
+    "qwen2_5": 26,
+    "deepseek_v3": 24,
+    "mistral_nemo": 26,
+    "claude": 29,
+    "chatglm3": 31
+   }
+  },
+  {
+   "id": "punct",
+   "text": "!!!???...;;;:::---___===+++***&&&|||~~~```",
+   "why": "Repeated punctuation merges.",
+   "counts": {
+    "cl100k": 18,
+    "o200k": 15,
+    "llama2": 23,
+    "llama3": 17,
+    "gemma": 14,
+    "gemma3": 17,
+    "qwen2_5": 18,
+    "deepseek_v3": 18,
+    "mistral_nemo": 19,
+    "claude": 17,
+    "chatglm3": 23
+   }
+  },
+  {
+   "id": "repeat_a",
+   "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "why": "Single-char run: longest merge in vocab.",
+   "counts": {
+    "cl100k": 8,
+    "o200k": 8,
+    "llama2": 11,
+    "llama3": 8,
+    "gemma": 8,
+    "gemma3": 8,
+    "qwen2_5": 8,
+    "deepseek_v3": 8,
+    "mistral_nemo": 32,
+    "claude": 4,
+    "chatglm3": 18
+   }
+  },
+  {
+   "id": "xml",
+   "text": "<div class=\"row\"><span id=\"x\">&nbsp;&lt;tag&gt;</span></div>",
+   "why": "Markup/entities.",
+   "counts": {
+    "cl100k": 21,
+    "o200k": 21,
+    "llama2": 23,
+    "llama3": 21,
+    "gemma": 23,
+    "gemma3": 21,
+    "qwen2_5": 21,
+    "deepseek_v3": 21,
+    "mistral_nemo": 21,
+    "claude": 24,
+    "chatglm3": 24
+   }
+  },
+  {
+   "id": "english",
+   "text": "The quick brown fox jumps over the lazy dog while the cat watches silently.",
+   "why": "Plain English (low spread, good control).",
+   "counts": {
+    "cl100k": 15,
+    "o200k": 15,
+    "llama2": 17,
+    "llama3": 15,
+    "gemma": 15,
+    "gemma3": 15,
+    "qwen2_5": 15,
+    "deepseek_v3": 15,
+    "mistral_nemo": 15,
+    "claude": 15,
+    "chatglm3": 16
+   }
+  },
+  {
+   "id": "german",
+   "text": "Donaudampfschifffahrtsgesellschaftskapitänswitwe trinkt Rindfleischetikettierungsüberwachungsaufgabenübertragungsgesetz.",
+   "why": "German compounds.",
+   "counts": {
+    "cl100k": 47,
+    "o200k": 35,
+    "llama2": 43,
+    "llama3": 46,
+    "gemma": 35,
+    "gemma3": 35,
+    "qwen2_5": 47,
+    "deepseek_v3": 40,
+    "mistral_nemo": 37,
+    "claude": 44,
+    "chatglm3": 49
+   }
+  },
+  {
+   "id": "accents",
+   "text": "Ünïcödé façade naïve coöperate résumé jalapeño Ångström Øresund",
+   "why": "Latin diacritics.",
+   "counts": {
+    "cl100k": 27,
+    "o200k": 21,
+    "llama2": 30,
+    "llama3": 27,
+    "gemma": 18,
+    "gemma3": 21,
+    "qwen2_5": 26,
+    "deepseek_v3": 22,
+    "mistral_nemo": 23,
+    "claude": 31,
+    "chatglm3": 32
+   }
+  },
+  {
+   "id": "mixed",
+   "text": "Model名: GPT/Llama/Qwen 混合 text — 2026年 🚀 v3.1.4",
+   "why": "Mixed scripts.",
+   "counts": {
+    "cl100k": 28,
+    "o200k": 25,
+    "llama2": 31,
+    "llama3": 27,
+    "gemma": 26,
+    "gemma3": 28,
+    "qwen2_5": 30,
+    "deepseek_v3": 26,
+    "mistral_nemo": 29,
+    "claude": 28,
+    "chatglm3": 33
+   }
+  },
+  {
+   "id": "json",
+   "text": "{\"model\":\"x\",\"temperature\":0.7,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+   "why": "JSON.",
+   "counts": {
+    "cl100k": 22,
+    "o200k": 23,
+    "llama2": 25,
+    "llama3": 22,
+    "gemma": 24,
+    "gemma3": 22,
+    "qwen2_5": 22,
+    "deepseek_v3": 24,
+    "mistral_nemo": 23,
+    "claude": 22,
+    "chatglm3": 27
+   }
+  },
+  {
+   "id": "year_list",
+   "text": "1999 2000 2001 2024 2025 2026 1066 1492 1776 1914",
+   "why": "Year-like numbers.",
+   "counts": {
+    "cl100k": 29,
+    "o200k": 29,
+    "llama2": 50,
+    "llama3": 29,
+    "gemma": 49,
+    "gemma3": 49,
+    "qwen2_5": 49,
+    "deepseek_v3": 29,
+    "mistral_nemo": 49,
+    "claude": 16,
+    "chatglm3": 50
+   }
+  }
+ ]
+}

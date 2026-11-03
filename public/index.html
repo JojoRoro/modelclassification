@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tokenizer Fingerprinter</title>
+<meta name="description" content="Classify new and stealth LLMs on OpenRouter by their tokenizer fingerprint, using free models only.">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>Tokenizer Fingerprinter</h1>
+    <p class="sub">Identify which tokenizer family a model uses (and so, likely, who built it) from the prompt-token counts its API reports. Free OpenRouter models only.</p>
+  </div>
+  <div class="keybox">
+    <label for="apiKey">OpenRouter key</label>
+    <div class="row">
+      <input id="apiKey" type="password" placeholder="sk-or-v1-…" autocomplete="off" spellcheck="false">
+      <button id="toggleKey" class="ghost" type="button" title="Show/hide">👁</button>
+      <button id="checkKey" type="button">Check</button>
+    </div>
+    <div id="keyInfo" class="muted small">The key stays in this browser (localStorage) and is sent only to openrouter.ai.</div>
+  </div>
+</header>
+
+<main class="grid">
+  <!-- ============ MODEL SELECTOR ============ -->
+  <section class="card" id="selector">
+    <div class="card-head">
+      <h2>Models</h2>
+      <span class="muted small" id="catalogInfo">loading catalog…</span>
+    </div>
+
+    <div class="filters">
+      <input id="q" type="search" placeholder="Search id, name, description…">
+      <div class="toggles">
+        <label class="chk"><input type="checkbox" id="fFree" checked> Free only</label>
+        <label class="chk"><input type="checkbox" id="fStealth"> Stealth candidates</label>
+        <label class="chk"><input type="checkbox" id="fSelected"> Selected only</label>
+        <label class="chk"><input type="checkbox" id="fText" checked> Text output</label>
+      </div>
+      <div class="row wrap">
+        <label class="small">Added within
+          <select id="fAge">
+            <option value="0">any time</option><option value="7">7 days</option><option value="30">30 days</option>
+            <option value="90">90 days</option><option value="365">1 year</option>
+          </select>
+        </label>
+        <label class="small">Sort
+          <select id="sort">
+            <option value="new">newest</option><option value="name">name</option>
+            <option value="vendor">vendor</option><option value="ctx">context</option>
+          </select>
+        </label>
+      </div>
+      <details class="facet" open>
+        <summary>Vendor <span class="muted small" id="vendorCount"></span></summary>
+        <div class="chips" id="vendorChips"></div>
+      </details>
+      <details class="facet">
+        <summary>Declared tokenizer <span class="muted small" id="tokCount"></span></summary>
+        <div class="chips" id="tokChips"></div>
+      </details>
+    </div>
+
+    <div class="mass">
+      <button data-mass="allFree" class="primary" type="button">Select all free</button>
+      <button data-mass="visible" type="button">Select visible</button>
+      <button data-mass="stealth" type="button">Select stealth</button>
+      <button data-mass="perVendor" type="button">1 per vendor</button>
+      <button data-mass="invert" type="button">Invert visible</button>
+      <button data-mass="none" class="ghost" type="button">Clear</button>
+    </div>
+    <div class="muted small" id="selInfo"></div>
+    <ul class="models" id="modelList" aria-label="Model list"></ul>
+  </section>
+
+  <!-- ============ RUN + RESULTS ============ -->
+  <section class="stack">
+    <div class="card" id="runCard">
+      <div class="card-head"><h2>Run</h2><span class="muted small" id="refInfo"></span></div>
+
+      <details class="facet">
+        <summary>Probes <span class="muted small" id="probeCount"></span></summary>
+        <p class="small muted">Each probe = one request per model. The default set was chosen greedily to maximise separation between tokenizer families.</p>
+        <div class="row wrap">
+          <button type="button" class="ghost small-btn" id="probeDefault">Default set</button>
+          <button type="button" class="ghost small-btn" id="probeAll">All</button>
+        </div>
+        <ul class="probes" id="probeList"></ul>
+      </details>
+
+      <details class="facet">
+        <summary>Settings</summary>
+        <div class="settings">
+          <label class="small">Token source
+            <select id="tokenSource">
+              <option value="usage">usage.prompt_tokens (response)</option>
+              <option value="generation">native_tokens_prompt (/generation, +1 free call)</option>
+            </select>
+          </label>
+          <label class="small">Delay between requests (ms)
+            <input id="delay" type="number" min="500" step="100" value="3200">
+          </label>
+          <label class="small">Daily free-request budget
+            <input id="dailyBudget" type="number" min="1" value="50">
+          </label>
+          <label class="chk small"><input type="checkbox" id="spendGuard" checked> Abort if key usage ($) increases</label>
+        </div>
+      </details>
+
+      <div class="estimate" id="estimate"></div>
+      <div class="row">
+        <button id="run" class="primary" type="button">Run fingerprint</button>
+        <button id="stop" type="button" disabled>Stop</button>
+        <span class="grow"></span>
+        <button id="clearCache" class="ghost" type="button" title="Forget cached observations">Clear cache</button>
+      </div>
+      <div class="progress"><div id="bar"></div></div>
+      <div class="muted small" id="status">Idle.</div>
+    </div>
+
+    <div class="card" id="resultsCard">
+      <div class="card-head">
+        <h2>Results</h2>
+        <div class="row">
+          <button id="exportJson" class="ghost" type="button">JSON</button>
+          <button id="exportCsv" class="ghost" type="button">CSV</button>
+        </div>
+      </div>
+      <div id="calib" class="calib"></div>
+      <div class="table-wrap">
+        <table id="results">
+          <thead><tr>
+            <th>Model</th><th>Verdict</th><th>Tokenizer family</th><th title="Fitted chat-template overhead">Ovh.</th>
+            <th>Declared / expected</th><th>Probes</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="muted small">Click a row for per-probe residuals. <b>unknown</b> = no reference tokenizer fits, so it's likely a new tokenizer. That is a strong signal for a stealth model from a lab whose tokenizer isn't in the reference set.</p>
+    </div>
+
+    <div class="card" id="detailCard" hidden>
+      <div class="card-head"><h2 id="detailTitle">Detail</h2><button class="ghost" id="closeDetail" type="button">✕</button></div>
+      <div id="detail"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="muted small">
+  Method & research notes: see <code>RESEARCH.md</code>. Reference tokenizer counts are precomputed in <code>data/reference.json</code> (<code>npm run refs</code>).
+</footer>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
