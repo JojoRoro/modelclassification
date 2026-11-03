@@ -38,6 +38,7 @@ This app implements the first three, because they are cheap enough for the free 
    The true tokenizer gives a column of zeros. Margins of ±1 are tolerated because the first or last token of the probe can merge with template tokens. Verdicts:
    - **match**: ≥ 80% of probes within ±1, relative error ≤ 3%, and the runner-up is clearly worse
    - **likely**: fits, but the runner-up is close
+   - **variant**: within 5% of one family but not exact (a derived vocabulary)
    - **unknown**: nothing fits. This is the interesting outcome for a stealth model: a new tokenizer, i.e. a new or retrained model from a lab whose tokenizer isn't in the reference set.
 
 5. **Validation** (`npm test`): simulated endpoints with arbitrary overheads and ±1 boundary noise are recovered 100%. In a **leave-one-family-out** test, a family missing from the reference set is always reported `unknown`, never confidently matched to a wrong family. In the app, a **calibration** panel runs the classifier on free models whose family is known (Llama, Qwen, Gemma, DeepSeek, gpt-oss, Mistral…) and shows the agreement rate. Use it to check the pipeline on your key before trusting a verdict on a stealth model.
@@ -51,6 +52,40 @@ This app implements the first three, because they are cheap enough for the free 
 - **Provider wrappers**: some providers inject system prompts or strip characters (e.g. emoji). The offset absorbs constant injections. Per-character stripping shows up as large residuals on one probe only, which you can see in the detail view.
 - **Is `usage` native?** OpenRouter reports native token counts. If you ever see every model classified as o200k, the counts are being normalised. Switch *Token source* to `native_tokens_prompt`.
 - **Privacy:** stealth endpoints usually log prompts for training. The probes are synthetic and harmless; don't add private data.
+
+## Case study: why known-lab models came back "unknown" (Nov 2026 run)
+
+The first real run, with the 8 default probes, returned `unknown` for four models from known labs. The raw counts are in `test/fixtures/observed-2026-11.json`. After subtracting each endpoint's overhead and comparing against every reference:
+
+| Model | Best built-in match | What the residuals show |
+|---|---|---|
+| `z-ai/glm-5.3-flashx-legal` | DeepSeek, 27.6% error | **A new tokenizer.** GLM-5 isn't in the reference set. Its digit handling is unusual: 60 digits become 38 tokens, where every reference gives 20 or 60. |
+| `aion-labs/aion-3.5` | DeepSeek, 25.3% error | **The same tokenizer as GLM-5.3.** Model-to-model residuals are 0 on 6 of 8 probes and +3/+1 on the other two. OpenRouter describes Aion 3.5 as "built on the GLM family", so the fingerprint recovered the base model with no metadata. |
+| `xiaomi/mimo-v2.6-flash` | Qwen, 2.4% error | **A Qwen-derived vocabulary.** Exact on 5 of 8 probes and −2 on three. The old binary verdict needed ≥ 80% of probes within ±1, so a near-match was reported as unknown. |
+| `meta/muse-spark-open` | o200k, 9.1% error | **A new tokenizer of the same style as o200k:** identical on Latin text, digits and whitespace, different on CJK, Korean, Hindi and emoji. The endpoint also injects about 144 tokens of hidden system prompt; the offset fit absorbs it. Muse Spark is proprietary. Whether it shares Llama 4's ~200k vocabulary can be tested by adding that `tokenizer.json`. |
+
+**Root causes:**
+1. **Missing references.** The reference set only covers tokenizers that exist as npm packages. A new lab, or a new generation with a retrained vocabulary (GLM-5, Muse), can only be `unknown`. The leave-one-family-out test shows this is the intended behaviour.
+2. **Verdicts were too binary.** Derived vocabularies such as MiMo ≈ Qwen fell through.
+3. **No memory.** The same unknown tokenizer seen twice (GLM and Aion) wasn't recognised as the same thing.
+4. **No vendor ground truth.** OpenRouter lists `Other` as the tokenizer for all of these, and `expectedFamily` had no rules for z-ai, xiaomi or meta.
+
+## Detecting new model types: signatures
+
+Three mechanisms, all in the web app and in `public/js/classify.js`:
+
+1. **`variant` verdict.** ≤ 5% relative error and ≥ 50% of probes within ±1, but not an exact fit. Reads as "derived from X" (MiMo → variant of Qwen).
+2. **Clustering of unknowns** (`clusterByTokenizer`). Models that match no reference are compared with each other after fitting an offset. Two models are grouped if ≥ 75% of their shared probes agree within ±1 and none differ by more than 3. Each group is a *new tokenizer type*, shown in the **New tokenizer types** panel. On the Nov 2026 data: {GLM-5.3, Aion-3.5}, {MiMo}, {Muse Spark}.
+3. **Signatures**, i.e. extra reference classes created at runtime:
+   - **observed** (`signatureFromObservations`): one model's API counts, normalised by its own overhead (anchor probe − 1). Use these for closed models from a known lab. Create one with **Save as signature** on a cluster or a model, or with `node scripts/add-signature.mjs fingerprints.json <model> --family <name>`. They're approximate: only the probes that were run, and the overhead estimate can be off by 1–3 tokens. The scorer therefore tolerates small negative offsets for them. **Probe deeper** runs all 30 probes on a model to make its signature more specific.
+   - **tokenizer** (`signatureFromTokenizer`): exact counts from a HuggingFace `tokenizer.json`. Use these for open-weights models. In the app, enter a repo id (e.g. `zai-org/GLM-4.5`) or upload the file. The browser tokenises all 30 probes with a vendored copy of `@lenml/tokenizers`; a test checks it gives identical counts to the build step. If a tokenizer is identical to an existing reference on every probe, it is rejected as a duplicate. Gated repos (e.g. Llama 4) need an HF token or a file upload. Repos that ship only `tiktoken` or SentencePiece files (no `tokenizer.json`) aren't supported.
+
+Bundled signatures live in `public/data/signatures.json`. They are currently seeded from the Nov 2026 run: GLM-5 (Zhipu), MiMo-V2 (Xiaomi) and Muse Spark (Meta). With them, Aion-3.5, which wasn't used to build any signature, is classified **GLM, match, 1.8% error**. The three seed models match their own signatures, which is circular and not evidence of accuracy. Signatures can be exported and imported as JSON to share them.
+
+**Easiest way to add a signature:**
+- open-weights → paste the HF repo id → **Add**
+- closed model from a known lab → run it once → **Save as signature** (then **Probe deeper**)
+- you suspect a stealth model is lab X → add X's newest open `tokenizer.json`; cached observations are re-scored instantly at no request cost.
 
 ## Reported case studies (unverified, from the web)
 
@@ -74,4 +109,5 @@ These were found by web search; abstracts only were checked, not full papers.
 
 - **More reference tokenizers**: add `@lenml/tokenizer-*` packages to `lib/tokenizers.mjs`, or drop `tokenizer.json` files into `tokenizers/`. Then run `npm run refs`.
 - **More probes**: edit `lib/probe-pool.mjs`, then `npm run refs -- --probes 10` to pick a larger default set.
+- **Signatures**: see "Detecting new model types" above.
 - **Next steps not yet implemented**: truncation-boundary probing, and single-token answer distributions to tell models apart within a tokenizer family.

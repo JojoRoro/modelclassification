@@ -1,0 +1,57 @@
+{
+ "note": "Real prompt_tokens observations via OpenRouter, 2026-11 (8 default probes).",
+ "models": [
+  {
+   "model": "meta/muse-spark-open",
+   "observations": {
+    "anchor": 145,
+    "emoji": 186,
+    "korean": 163,
+    "cjk_zh": 166,
+    "hindi": 168,
+    "digits60": 164,
+    "digits_sep": 167,
+    "spaces": 147
+   }
+  },
+  {
+   "model": "aion-labs/aion-3.5",
+   "observations": {
+    "anchor": 8,
+    "emoji": 45,
+    "korean": 39,
+    "cjk_zh": 25,
+    "hindi": 60,
+    "digits60": 42,
+    "digits_sep": 31,
+    "spaces": 8
+   }
+  },
+  {
+   "model": "z-ai/glm-5.3-flashx-legal",
+   "observations": {
+    "anchor": 13,
+    "emoji": 53,
+    "korean": 47,
+    "cjk_zh": 33,
+    "hindi": 68,
+    "digits60": 50,
+    "digits_sep": 39,
+    "spaces": 15
+   }
+  },
+  {
+   "model": "xiaomi/mimo-v2.6-flash",
+   "observations": {
+    "anchor": 8,
+    "emoji": 43,
+    "korean": 37,
+    "cjk_zh": 31,
+    "hindi": 68,
+    "digits60": 69,
+    "digits_sep": 48,
+    "spaces": 10
+   }
+  }
+ ]
+}

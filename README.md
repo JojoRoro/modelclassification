@@ -15,6 +15,7 @@ Then open <http://localhost:5173>. Any static host also works, because the app i
 1. Paste your OpenRouter key and press **Check**. The key is kept in your browser's localStorage and sent only to `openrouter.ai`. It is never committed or sent anywhere else.
 2. Pick models. Filter by search text, free only, stealth candidates, vendor, declared tokenizer, age or output modality. Mass-select with **Select all free**, **Select visible**, **Select stealth**, **1 per vendor**, **Invert visible** or **Clear**.
 3. Press **Run fingerprint**. Results are cached per model and probe, so re-runs and re-scoring are free.
+4. Models that match no reference appear under **New tokenizer types**, grouped when they share a tokenizer. Save a group as a **signature**, or add an exact signature from a HuggingFace `tokenizer.json`, and future models with that tokenizer are recognised. See [RESEARCH.md](RESEARCH.md#detecting-new-model-types-signatures).
 
 ## Costs and budget safety
 
@@ -43,6 +44,12 @@ npm test
 ```
 
 Runs simulation tests: exact recovery with arbitrary overheads, ±1 noise, and leave-one-family-out.
+
+```bash
+node scripts/add-signature.mjs fingerprints.json <model-id> --family <name>
+```
+
+Bundles an observed signature from a results export into `public/data/signatures.json`.
 
 To add a tokenizer family, such as a new open-weights release you suspect is behind a stealth model, drop its HuggingFace `tokenizer.json` into `tokenizers/<name>.json` and run `npm run refs`.
 

@@ -144,6 +144,36 @@
       <p class="muted small">Click a row for per-probe residuals. <b>unknown</b> = no reference tokenizer fits, so it's likely a new tokenizer. That is a strong signal for a stealth model from a lab whose tokenizer isn't in the reference set.</p>
     </div>
 
+    <div class="card" id="clustersCard" hidden>
+      <div class="card-head"><h2>New tokenizer types</h2><span class="muted small" id="clusterInfo"></span></div>
+      <p class="small muted">Models that matched no reference, grouped when their counts agree with each other. Models in one group share a tokenizer. Save a group as a signature and future models with that tokenizer will be classified as it.</p>
+      <div id="clusters"></div>
+    </div>
+
+    <div class="card" id="sigCard">
+      <div class="card-head"><h2>Signatures</h2><span class="muted small" id="sigInfo"></span></div>
+      <p class="small muted">Extra reference classes on top of the built-in tokenizers. <b>tokenizer</b> = exact counts from a <code>tokenizer.json</code> (open-weights models). <b>observed</b> = counts measured through the API from a model of a known lab (closed models).</p>
+      <div class="sig-add">
+        <label class="small">HuggingFace repo with a <code>tokenizer.json</code>
+          <div class="row">
+            <input id="hfRepo" type="text" placeholder="e.g. zai-org/GLM-4.5 or XiaomiMiMo/MiMo-V2-Flash" spellcheck="false">
+            <button id="hfAdd" type="button">Add</button>
+          </div>
+        </label>
+        <details class="facet"><summary class="small">More options</summary>
+          <div class="settings">
+            <label class="small">Family name (optional)<input id="sigFamily" type="text" placeholder="e.g. glm"></label>
+            <label class="small">HF token for gated repos (optional)<input id="hfToken" type="password" placeholder="hf_…" autocomplete="off"></label>
+            <label class="small">…or upload a tokenizer.json<input id="tokFile" type="file" accept=".json,application/json"></label>
+            <label class="small">Import signatures JSON<input id="sigImport" type="file" accept=".json,application/json"></label>
+          </div>
+        </details>
+      </div>
+      <div class="muted small" id="sigStatus"></div>
+      <ul class="sigs" id="sigList"></ul>
+      <div class="row"><button id="sigExport" class="ghost" type="button">Export my signatures</button></div>
+    </div>
+
     <div class="card" id="detailCard" hidden>
       <div class="card-head"><h2 id="detailTitle">Detail</h2><button class="ghost" id="closeDetail" type="button">✕</button></div>
       <div id="detail"></div>

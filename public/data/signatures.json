@@ -1,0 +1,62 @@
+{
+ "signatures": [
+  {
+   "id": "sig:glm:z-ai-glm-5.3-flashx-legal",
+   "label": "GLM-5 (Zhipu) · observed",
+   "family": "glm",
+   "source": "observed",
+   "model": "z-ai/glm-5.3-flashx-legal",
+   "note": "Aion 3.5 (GLM-based per OpenRouter) matches it",
+   "created": "2026-11-03",
+   "counts": {
+    "anchor": 1,
+    "emoji": 41,
+    "korean": 35,
+    "cjk_zh": 21,
+    "hindi": 56,
+    "digits60": 38,
+    "digits_sep": 27,
+    "spaces": 3
+   }
+  },
+  {
+   "id": "sig:mimo:xiaomi-mimo-v2.6-flash",
+   "label": "MiMo-V2 (Xiaomi) · observed",
+   "family": "mimo",
+   "source": "observed",
+   "model": "xiaomi/mimo-v2.6-flash",
+   "note": "Qwen-derived vocabulary (≈2% from Qwen 2.5)",
+   "created": "2026-11-03",
+   "counts": {
+    "anchor": 1,
+    "emoji": 36,
+    "korean": 30,
+    "cjk_zh": 24,
+    "hindi": 61,
+    "digits60": 62,
+    "digits_sep": 41,
+    "spaces": 3
+   }
+  },
+  {
+   "id": "sig:meta-muse:meta-muse-spark-open",
+   "label": "Muse Spark (Meta) · observed",
+   "family": "meta-muse",
+   "source": "observed",
+   "model": "meta/muse-spark-open",
+   "note": "o200k-like on Latin/digits, differs on CJK/Hindi/emoji; 144-token injected overhead",
+   "created": "2026-11-03",
+   "counts": {
+    "anchor": 1,
+    "emoji": 42,
+    "korean": 19,
+    "cjk_zh": 22,
+    "hindi": 24,
+    "digits60": 20,
+    "digits_sep": 23,
+    "spaces": 3
+   }
+  }
+ ],
+ "note": "Bundled signatures. source \"observed\" = prompt-token counts measured via the API, normalised by the anchor probe (overhead = anchor - 1)."
+}

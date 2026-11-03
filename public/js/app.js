@@ -1,4 +1,7 @@
-import { classify, isFree, expectedFamily, stealthSignals } from './classify.js';
+import {
+  classify, isFree, expectedFamily, stealthSignals,
+  mergeSignatures, signatureFromObservations, signatureFromTokenizer, clusterByTokenizer,
+} from './classify.js';
 
 const API = 'https://openrouter.ai/api/v1';
 const $ = (s) => document.querySelector(s);
@@ -23,6 +26,8 @@ const state = {
   errors: store.get('errors', {}),    // modelId -> last error summary (string)
   errlog: store.get('errlog', {}),    // modelId -> [{at, probe, http, code, message, provider, raw, hint, variant}]
   variant: store.get('variant', {}),  // modelId -> index into REQUEST_VARIANTS that worked
+  deep: new Set(store.get('deep', [])), // models to probe with the whole probe pool
+  sigBundled: [], sigUser: store.get('signatures', []), refEff: null,
   running: null, detailId: null,
 };
 const saveSel = () => store.set('selected', [...state.selected]);
@@ -82,8 +87,9 @@ async function loadCatalog() {
 async function loadRef() {
   const r = await fetch('data/reference.json');
   state.ref = await r.json();
+  try { state.sigBundled = (await (await fetch('data/signatures.json')).json()).signatures || []; } catch { state.sigBundled = []; }
+  rebuildRef();
   if (!state.probes.size) state.ref.defaultProbeIds.forEach((id) => state.probes.add(id));
-  $('#refInfo').textContent = `${state.ref.references.length} reference tokenizers`;
   renderProbes();
 }
 
@@ -249,7 +255,8 @@ function pendingTasks() {
   for (const id of state.selected) {
     const m = state.byId.get(id);
     if (!m) continue;
-    for (const pid of state.probes) if (!state.cache[id]?.[pid]) tasks.push({ id, pid, paid: !m._free });
+    const probes = state.deep.has(id) ? state.ref.probes.map((p) => p.id) : [...state.probes];
+    for (const pid of probes) if (!state.cache[id]?.[pid]) tasks.push({ id, pid, paid: !m._free });
   }
   return tasks;
 }
@@ -495,14 +502,153 @@ const FAMILY_NAMES = {
   gemma: 'Gemma / Gemini', qwen: 'Qwen', deepseek: 'DeepSeek', 'mistral-tekken': 'Mistral Tekken',
   'claude-legacy': 'Claude (legacy)', 'glm-legacy': 'ChatGLM3',
 };
-const famName = (f) => FAMILY_NAMES[f] || f;
+Object.assign(FAMILY_NAMES, { glm: 'GLM (Zhipu)', mimo: 'MiMo (Xiaomi)', 'meta-muse': 'Muse (Meta)', kimi: 'Kimi (Moonshot)', minimax: 'MiniMax' });
+const famName = (f) => FAMILY_NAMES[f] || state.refEff?.references.find((r) => r.family === f)?.label || f;
+
+// ---------- signatures ----------
+const allSignatures = () => [...state.sigBundled, ...state.sigUser];
+function rebuildRef() {
+  state.refEff = mergeSignatures(state.ref, allSignatures());
+  const nSig = allSignatures().length;
+  $('#refInfo').textContent = `${state.ref.references.length} reference tokenizers + ${nSig} signatures`;
+  renderSignatures();
+}
+function saveUserSignatures() { store.set('signatures', state.sigUser); rebuildRef(); renderResults(); }
+/** Existing reference/signature with identical counts on every shared probe (≥ 8), if any. */
+function identicalReference(sig) {
+  for (const r of state.refEff.references) {
+    const shared = state.ref.probes.filter((p) => Number.isFinite(sig.counts[p.id]) && Number.isFinite(state.refEff.probes.find((q) => q.id === p.id).counts[r.id]));
+    if (shared.length >= 8 && shared.every((p) => state.refEff.probes.find((q) => q.id === p.id).counts[r.id] === sig.counts[p.id])) return r;
+  }
+  return null;
+}
+function addSignature(sig) {
+  if (sig.source === 'tokenizer') {
+    const same = identicalReference(sig);
+    if (same && same.id !== sig.id) {
+      $('#sigStatus').textContent = `Not added: "${sig.label}" gives exactly the same counts as the existing reference "${same.label}" on all probes. It's the same tokenizer (family ${famName(same.family)}).`;
+      return false;
+    }
+  }
+  state.sigUser = state.sigUser.filter((s) => s.id !== sig.id);
+  state.sigUser.push(sig);
+  saveUserSignatures();
+  return true;
+}
+function renderSignatures() {
+  const ul = $('#sigList');
+  if (!ul) return;
+  const sigs = allSignatures();
+  $('#sigInfo').textContent = `${sigs.length} (${state.sigBundled.length} bundled)`;
+  ul.innerHTML = sigs.length ? '' : '<li class="muted small">No signatures yet.</li>';
+  for (const sg of sigs) {
+    const bundled = state.sigBundled.includes(sg);
+    const li = document.createElement('li');
+    li.innerHTML = `<div><b>${esc(sg.label)}</b> <span class="tag src-${esc(sg.source)}">${esc(sg.source)}</span>
+        <span class="tag">${Object.keys(sg.counts || {}).length} probes</span>${bundled ? ' <span class="tag">bundled</span>' : ''}
+        <div class="small muted">family <code>${esc(sg.family)}</code>${sg.model ? ` · from <code>${esc(sg.model)}</code>` : ''}${sg.note ? ` · ${esc(sg.note)}` : ''} · ${esc(sg.created || '')}</div></div>
+      ${bundled ? '' : '<button type="button" class="ghost small-btn">Remove</button>'}`;
+    li.querySelector('button')?.addEventListener('click', () => {
+      if (!confirm(`Remove signature "${sg.label}"?`)) return;
+      state.sigUser = state.sigUser.filter((x) => x !== sg); saveUserSignatures();
+    });
+    ul.appendChild(li);
+  }
+}
+const slug = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '');
+
+/** Offer to save one model's (or a cluster's) observations as an observed signature. */
+function saveObservedSignature(modelIds) {
+  const best = [...modelIds].sort((a, b) => Object.keys(observations(b)).length - Object.keys(observations(a)).length)[0];
+  const vendor = best.split('/')[0];
+  const exp = state.byId.get(best) ? expectedFamily(state.byId.get(best)) : null;
+  const fam = prompt(`Family name for the tokenizer of:\n${modelIds.join('\n')}\n\nModels matching it will be reported under this name. Use the lab or model-family name, e.g. glm, mimo, kimi.`, exp || slug(vendor));
+  if (!fam) return;
+  const label = prompt('Display label:', `${fam} (observed from ${best})`) || fam;
+  const sig = signatureFromObservations(observations(best), {
+    id: 'sig:' + slug(fam) + ':' + slug(best), family: slug(fam), label, model: best,
+    note: modelIds.length > 1 ? `cluster of ${modelIds.length}: ${modelIds.join(', ')}` : null,
+  });
+  addSignature(sig);
+  $('#sigStatus').textContent = `Saved signature "${label}" (${Object.keys(sig.counts).length} probes). Probe this model deeper to make it more specific.`;
+}
+
+// Tokenizer library (vendored browser build of @lenml/tokenizers, loaded on demand).
+let tokLib = null;
+function loadTokenizerLib() {
+  if (tokLib) return tokLib;
+  tokLib = new Promise((res, rej) => {
+    const sc = document.createElement('script');
+    sc.src = 'vendor/lenml-tokenizers-3.7.2.global.js';
+    sc.onload = () => (window.Tokenizers?.TokenizerLoader ? res(window.Tokenizers) : rej(new Error('tokenizer library failed to initialise')));
+    sc.onerror = () => { tokLib = null; rej(new Error('could not load tokenizer library')); };
+    document.head.appendChild(sc);
+  });
+  return tokLib;
+}
+async function signatureFromTokenizerJSON(tokenizerJSON, tokenizerConfig, { family, label, note }) {
+  const lib = await loadTokenizerLib();
+  const warn = console.warn; console.warn = () => {};
+  let tok;
+  try { tok = lib.TokenizerLoader.fromPreTrained({ tokenizerJSON, tokenizerConfig: tokenizerConfig || {} }); } finally { console.warn = warn; }
+  const sig = signatureFromTokenizer((t) => tok.encode(t, { add_special_tokens: false }).length, state.ref.probes, { family, label, note });
+  sig.id = 'tok:' + slug(family) + ':' + slug(label);
+  return sig;
+}
+const hfToken = $('#hfToken');
+hfToken.value = store.get('hfToken', '');
+hfToken.addEventListener('change', () => store.set('hfToken', hfToken.value.trim()));
+$('#hfAdd').onclick = async () => {
+  const repo = $('#hfRepo').value.trim().replace(/^https?:\/\/huggingface\.co\//, '').replace(/\/(tree|blob|resolve)\/.*$/, '');
+  const st = $('#sigStatus');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { st.textContent = 'Enter a repo id like owner/name.'; return; }
+  const headers = hfToken.value.trim() ? { Authorization: `Bearer ${hfToken.value.trim()}` } : {};
+  st.textContent = `Downloading ${repo}/tokenizer.json…`;
+  try {
+    const r = await fetch(`https://huggingface.co/${repo}/resolve/main/tokenizer.json`, { headers });
+    if (r.status === 401 || r.status === 403) throw new Error(`HTTP ${r.status}: gated or private repo. Accept the licence on huggingface.co and add an HF token, or upload the file.`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}: no tokenizer.json in this repo (some models ship only tiktoken/sentencepiece files, which aren't supported here).`);
+    const json = await r.json();
+    let cfg = {};
+    try { const c = await fetch(`https://huggingface.co/${repo}/resolve/main/tokenizer_config.json`, { headers }); if (c.ok) cfg = await c.json(); } catch { /* optional */ }
+    st.textContent = 'Tokenising probes…';
+    const fam = slug($('#sigFamily').value) || slug(repo.split('/')[1]);
+    const sig = await signatureFromTokenizerJSON(json, cfg, { family: fam, label: repo, note: 'huggingface.co/' + repo });
+    if (addSignature(sig)) st.textContent = `Added exact signature for ${repo} (family "${fam}"). All results were re-scored.`;
+  } catch (e) { st.textContent = '✗ ' + e.message; }
+};
+$('#tokFile').onchange = async (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  const st = $('#sigStatus');
+  try {
+    st.textContent = `Reading ${f.name}…`;
+    const json = JSON.parse(await f.text());
+    const fam = slug($('#sigFamily').value) || slug(f.name.replace(/\.json$/, '').replace(/tokenizer/i, '')) || 'custom';
+    const sig = await signatureFromTokenizerJSON(json, {}, { family: fam, label: `${fam} (${f.name})`, note: 'uploaded file' });
+    if (addSignature(sig)) st.textContent = `Added exact signature "${fam}" from ${f.name}.`;
+  } catch (e) { st.textContent = '✗ ' + e.message; }
+  ev.target.value = '';
+};
+$('#sigImport').onchange = async (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  try {
+    const j = JSON.parse(await f.text());
+    const list = (Array.isArray(j) ? j : j.signatures || []).filter((x) => x?.id && x?.counts && x?.family);
+    for (const sg of list) addSignature({ label: sg.family, source: 'observed', ...sg });
+    $('#sigStatus').textContent = `Imported ${list.length} signature(s).`;
+  } catch (e) { $('#sigStatus').textContent = '✗ ' + e.message; }
+  ev.target.value = '';
+};
+$('#sigExport').onclick = () => download('signatures.json', JSON.stringify({ signatures: state.sigUser }, null, 2), 'application/json');
 
 function observations(id) {
   return Object.fromEntries(Object.entries(state.cache[id] || {}).map(([pid, o]) => [pid, o.t]));
 }
 function resultFor(id) {
   const obs = observations(id);
-  const res = Object.keys(obs).length ? classify(obs, state.ref) : null;
+  const res = Object.keys(obs).length ? classify(obs, state.refEff) : null;
   const m = state.byId.get(id);
   const exp = m ? expectedFamily(m) : null;
   const log = state.errlog[id] || [];
@@ -521,12 +667,12 @@ function renderResults() {
   for (const r of rows) {
     const v = r.res?.verdict ?? (r.err ? 'error' : 'pending');
     const best = r.res?.best;
-    const agree = r.exp && best && r.res.verdict !== 'unknown' ? (best.family === r.exp) : null;
+    const agree = r.exp && best && ['match', 'likely', 'variant'].includes(r.res.verdict) ? (best.family === r.exp) : null;
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td class="mono">${esc(r.id)}${r.m?._stealth ? ' <span class="tag stealth">stealth?</span>' : ''}${r.m && !r.m._free ? ' <span class="tag paid">paid</span>' : ''}${r.err ? errorSnippet(r) : ''}</td>
       <td><span class="badge b-${v}">${v}</span>${r.res?.confidence ? `<div class="small muted">${Math.round(r.res.confidence * 100)}%</div>` : ''}</td>
-      <td>${best ? (v === 'unknown' ? `<span class="muted">nearest:</span> ${esc(famName(best.family))}` : `<b>${esc(famName(best.family))}</b>`) + `<div class="small muted">err ${(best.relErr * 100).toFixed(1)}%, ${best.within1}/${best.n} probes ±1` +
+      <td>${best ? (v === 'unknown' ? `<span class="muted">nearest:</span> ${esc(famName(best.family))}` : v === 'variant' ? `<span class="muted">variant of</span> <b>${esc(famName(best.family))}</b>` : `<b>${esc(famName(best.family))}</b>`) + (best.source === 'observed' ? ' <span class="tag src-observed">observed sig</span>' : '') + `<div class="small muted">err ${(best.relErr * 100).toFixed(1)}%, ${best.within1}/${best.n} probes ±1` +
         (r.res.runnerUp ? ` · next: ${esc(famName(r.res.runnerUp.family))} (Δ${r.res.runnerUp.score - best.score})` : '') + '</div>' : '—'}</td>
       <td>${best ? best.offset : '—'}</td>
       <td>${esc(r.m?.architecture?.tokenizer || '—')}${r.exp ? ` → ${esc(famName(r.exp))}` : ''}${agree === true ? ' <span class="agree">✓</span>' : agree === false ? ' <span class="disagree">✗</span>' : ''}</td>
@@ -537,8 +683,10 @@ function renderResults() {
   if (!rows.length) tb.innerHTML = '<tr><td colspan="6" class="muted">No results yet. Select free models and press Run.</td></tr>';
 
   // Calibration: how often does the classifier agree with known families?
-  const known = rows.filter((r) => r.exp && r.res && r.res.verdict !== 'insufficient');
-  const agreeN = known.filter((r) => r.res.verdict !== 'unknown' && r.res.best.family === r.exp).length;
+  // Calibration: only models whose expected family has a reference or signature.
+  const fams = new Set(state.refEff.references.map((x) => x.family));
+  const known = rows.filter((r) => r.exp && fams.has(r.exp) && r.res && r.res.verdict !== 'insufficient');
+  const agreeN = known.filter((r) => ['match', 'likely'].includes(r.res.verdict) && r.res.best.family === r.exp).length;
   const unknownN = rows.filter((r) => r.res?.verdict === 'unknown').length;
   const stealthN = rows.filter((r) => r.m?._stealth && r.res).length;
   $('#calib').innerHTML = `
@@ -546,7 +694,36 @@ function renderResults() {
     <div class="stat"><b>${known.length ? Math.round((100 * agreeN) / known.length) + '%' : '—'}</b><span class="small muted">agree w/ known (${agreeN}/${known.length})</span></div>
     <div class="stat"><b>${unknownN}</b><span class="small muted">unknown tokenizer</span></div>
     <div class="stat"><b>${stealthN}</b><span class="small muted">stealth candidates</span></div>`;
+  renderClusters(rows);
   if (state.detailId) showDetail(state.detailId, true);
+}
+
+function renderClusters(rows) {
+  const cand = rows.filter((r) => r.res && ['unknown', 'variant'].includes(r.res.verdict));
+  const card = $('#clustersCard');
+  card.hidden = !cand.length;
+  if (!cand.length) { $('#clusters').innerHTML = ''; return; }
+  const groups = clusterByTokenizer(cand.map((r) => ({ id: r.id, obs: r.obs, r })));
+  $('#clusterInfo').textContent = `${groups.length} type(s) from ${cand.length} model(s)`;
+  $('#clusters').innerHTML = '';
+  groups.forEach((g, i) => {
+    const vendors = [...new Set(g.map((x) => x.id.split('/')[0]))];
+    const near = g[0].r.res.best;
+    const nProbes = Math.max(...g.map((x) => Object.keys(x.obs).length));
+    const div = document.createElement('div');
+    div.className = 'cluster';
+    div.innerHTML = `<div class="row wrap"><b>Type ${i + 1}</b>
+        <span class="tag">${g.length} model${g.length > 1 ? 's' : ''}</span>
+        <span class="tag">labs: ${esc(vendors.join(', '))}</span>
+        <span class="tag">${g[0].r.res.verdict === 'variant' ? 'variant of' : 'nearest'} ${esc(famName(near.family))} (${(near.relErr * 100).toFixed(1)}% err)</span></div>
+      <div class="members">${g.map((x) => esc(x.id)).join('<br>')}</div>
+      ${g.length > 1 ? '<div class="small muted">These models agree with each other probe-by-probe, so they share a tokenizer that is not in the reference set.</div>' : ''}
+      <div class="row wrap"><button type="button" class="small-btn save">Save as signature</button>
+      <button type="button" class="ghost small-btn deep">Probe deeper (${state.ref.probes.length} probes${nProbes >= state.ref.probes.length ? ', done' : ''})</button></div>`;
+    div.querySelector('.save').onclick = () => saveObservedSignature(g.map((x) => x.id));
+    div.querySelector('.deep').onclick = () => { g.forEach((x) => { state.deep.add(x.id); state.selected.add(x.id); }); store.set('deep', [...state.deep]); saveSel(); renderModels(); $('#status').textContent = `Queued all probes for ${g.length} model(s). Press Run.`; };
+    $('#clusters').appendChild(div);
+  });
 }
 
 function errorSnippet(r) {
@@ -577,6 +754,11 @@ document.addEventListener('click', (ev) => {
   if (ev.target.id === 'copyErr') {
     navigator.clipboard?.writeText(JSON.stringify({ model: id, errors: state.errlog[id] || [] }, null, 2))
       .then(() => { ev.target.textContent = 'Copied ✓'; }, () => { ev.target.textContent = 'Copy failed'; });
+  } else if (ev.target.id === 'saveSig') {
+    saveObservedSignature([id]);
+  } else if (ev.target.id === 'deepProbe') {
+    state.deep.add(id); state.selected.add(id); store.set('deep', [...state.deep]); saveSel(); renderModels(); showDetail(id, true);
+    $('#status').textContent = `Queued all probes for ${id}. Press Run.`;
   } else if (ev.target.id === 'clearErr') {
     delete state.errlog[id]; delete state.errors[id]; delete state.variant[id];
     saveCache(); renderResults(); showDetail(id, true);
@@ -591,21 +773,24 @@ function showDetail(id, quiet) {
   if (!r.res) { $('#detail').innerHTML = errorDetail(r) || '<p class="muted">No observations yet.</p>'; return; }
   const top = r.res.rows.slice(0, 6);
   const probes = state.ref.probes.filter((p) => Number.isFinite(r.obs[p.id]));
-  const cell = (e) => `<td class="${e === 0 ? 'r0' : Math.abs(e) <= 1 ? 'r1' : 'rN'}">${e > 0 ? '+' : ''}${e}</td>`;
+  const cell = (e) => e === undefined ? '<td class="muted">·</td>' : `<td class="${e === 0 ? 'r0' : Math.abs(e) <= 1 ? 'r1' : 'rN'}">${e > 0 ? '+' : ''}${e}</td>`;
   const providers = [...new Set(Object.values(state.cache[id] || {}).map((o) => o.provider).filter(Boolean))];
   $('#detail').innerHTML = `
     <p class="small">${r.m?.description ? esc(r.m.description.slice(0, 400)) + (r.m.description.length > 400 ? '…' : '') : ''}</p>
     <p class="small muted">Provider(s) that served the requests: ${esc(providers.join(', ') || 'n/a')}. Stealth signals: ${esc(r.m?._sig?.join('; ') || 'none')}.</p>
     <div class="table-wrap"><table class="detail-table">
-      <thead><tr><th>probe</th><th>observed</th>${top.map((t) => `<th title="${esc(t.label)}">${esc(t.id)}<br><span class="muted">ovh ${t.offset}</span></th>`).join('')}</tr></thead>
+      <thead><tr><th>probe</th><th>observed</th>${top.map((t) => `<th title="${esc(t.label)}">${esc(t.source === 'observed' ? t.family + '*' : t.id)}<br><span class="muted">ovh ${t.offset}</span></th>`).join('')}</tr></thead>
       <tbody>${probes.map((p) => {
-        const i = probes.indexOf(p);
-        return `<tr><td>${esc(p.id)}</td><td>${r.obs[p.id]}</td>${top.map((t) => cell(t.resid[i])).join('')}</tr>`;
+        return `<tr><td>${esc(p.id)}</td><td>${r.obs[p.id]}</td>${top.map((t) => cell(t.resid[p.id])).join('')}</tr>`;
       }).join('')}
       <tr><td><b>Σ|resid|</b></td><td></td>${top.map((t) => `<td><b>${t.absErr}</b></td>`).join('')}</tr></tbody>
     </table></div>
+    <div class="row wrap" style="margin-top:8px">
+      <button type="button" class="small-btn" id="saveSig">Save as signature</button>
+      <button type="button" class="ghost small-btn" id="deepProbe">${state.deep.has(id) ? 'Deep probing queued ✓' : `Probe deeper (all ${state.ref.probes.length} probes)`}</button>
+    </div>
     ${errorDetail(r)}
-    <p class="small muted">Cells are residuals after fitting the template overhead (observed − reference − overhead). The true tokenizer has a column of zeros. ±1 can come from token merges at the template boundary.</p>`;
+    <p class="small muted">Cells are residuals after fitting the template overhead (observed − reference − overhead). The true tokenizer has a column of zeros. ±1 can come from token merges at the template boundary. * = observed signature (its overhead is relative); · = probe not in that signature.</p>`;
   if (!quiet) $('#detailCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 $('#closeDetail').onclick = () => { state.detailId = null; $('#detailCard').hidden = true; };
