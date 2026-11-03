@@ -20,11 +20,16 @@ const state = {
   probes: new Set(store.get('probes', [])),
   vendors: new Set(), toks: new Set(),
   cache: store.get('cache', {}),      // modelId -> probeId -> {t, provider, at}
-  errors: store.get('errors', {}),    // modelId -> message
+  errors: store.get('errors', {}),    // modelId -> last error summary (string)
+  errlog: store.get('errlog', {}),    // modelId -> [{at, probe, http, code, message, provider, raw, hint, variant}]
+  variant: store.get('variant', {}),  // modelId -> index into REQUEST_VARIANTS that worked
   running: null, detailId: null,
 };
 const saveSel = () => store.set('selected', [...state.selected]);
-const saveCache = () => { store.set('cache', state.cache); store.set('errors', state.errors); };
+const saveCache = () => {
+  store.set('cache', state.cache); store.set('errors', state.errors);
+  store.set('errlog', state.errlog); store.set('variant', state.variant);
+};
 
 // ---------- API key ----------
 const keyInput = $('#apiKey');
@@ -250,7 +255,16 @@ function renderEstimate() {
 // ---------- runner ----------
 class Fatal extends Error {}
 
-async function callModel(model, text, signal, maxTokens = 1) {
+// Request shapes tried in order when a provider rejects one. Prompt tokens don't
+// depend on max_tokens, so any variant gives the same fingerprint. All are free.
+const REQUEST_VARIANTS = [
+  { label: 'max_tokens=1, temperature=0', body: { max_tokens: 1, temperature: 0 } },
+  { label: 'max_tokens=16', body: { max_tokens: 16 } },
+  { label: 'max_tokens=256', body: { max_tokens: 256 } },
+  { label: 'max_tokens=1024', body: { max_tokens: 1024 } },
+];
+
+async function callModel(model, text, signal, variant = 0) {
   // HARD SPENDING GUARD: re-check right before every request.
   const m = state.byId.get(model);
   if (!m || !isFree(m)) throw new Fatal(`refusing non-free model ${model}`);
@@ -260,9 +274,11 @@ async function callModel(model, text, signal, maxTokens = 1) {
       Authorization: `Bearer ${key()}`, 'Content-Type': 'application/json',
       'HTTP-Referer': location.origin, 'X-Title': 'Tokenizer Fingerprinter',
     },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], max_tokens: maxTokens, temperature: 0 }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], ...REQUEST_VARIANTS[variant].body }),
   });
-  const j = await r.json().catch(() => ({}));
+  const rawText = await r.text().catch(() => '');
+  let j = {};
+  try { j = JSON.parse(rawText); } catch { j = rawText ? { error: { message: 'Non-JSON response', metadata: { raw: rawText } } } : {}; }
   return { status: r.status, headers: r.headers, body: j };
 }
 
@@ -278,36 +294,101 @@ async function nativeTokens(genId, signal) {
   return null;
 }
 
+const clip = (x, n = 1500) => { const t = typeof x === 'string' ? x : JSON.stringify(x); return t && t.length > n ? t.slice(0, n) + '…' : t; };
+
+/** Best-effort plain-language explanation of an OpenRouter / provider error. */
+function errorHint(http, msg, raw) {
+  const t = `${msg} ${raw}`.toLowerCase();
+  if (/data policy|privacy|training|publication|logging/.test(t)) return 'Model needs a privacy opt-in: enable free-model training/logging in OpenRouter Settings → Privacy (stealth models usually require this).';
+  if (/no endpoints found|not a valid model|model not found|does not exist/.test(t) || http === 404) return 'No available endpoint for this model (removed, renamed, or blocked by your provider/privacy settings).';
+  if (/max_tokens|max_completion|max_output|minimum|at least \d+/.test(t)) return 'Provider rejects this max_tokens value; retried with larger values.';
+  if (/temperature/.test(t)) return 'Provider rejects the temperature parameter; retried without it.';
+  if (/moderation|flagged|safety|content policy/.test(t) || http === 403) return 'Prompt was blocked by moderation. Try deselecting this probe.';
+  if (/context|too long|token limit/.test(t)) return 'Prompt too long for this endpoint.';
+  if (/timeout|timed out/.test(t) || http === 408) return 'Provider timed out.';
+  if (/overloaded|capacity|unavailable|busy/.test(t) || http === 502 || http === 503) return 'Provider overloaded or down. Retry later.';
+  if (/rate|quota|limit/.test(t)) return 'Rate or quota limit on the upstream provider.';
+  if (/provider returned error/.test(t)) return 'Generic upstream error; see the raw provider message.';
+  return '';
+}
+
+function logError(id, rec) {
+  const log = (state.errlog[id] ||= []);
+  log.push(rec);
+  if (log.length > 20) log.splice(0, log.length - 20);
+  console.warn('[fingerprinter]', id, rec);
+}
+
 async function probeOnce(id, probe, signal, status) {
-  let maxTokens = 1;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const { status: code, headers, body } = await callModel(id, probe.text, signal, maxTokens);
-    const err = body?.error;
-    if (code === 200 && !err && body.usage) {
-      let t = body.usage.prompt_tokens;
+  let variant = state.variant[id] ?? 0;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 7; attempt++) {
+    let res;
+    try {
+      res = await callModel(id, probe.text, signal, variant);
+    } catch (e) {
+      if (e instanceof Fatal || e.name === 'AbortError') throw e;
+      // fetch() itself failed: network, CORS, DNS, blocked by extension…
+      const rec = { at: Date.now(), probe: probe.id, http: 0, code: null, message: `Network error: ${e.message}`, provider: null, raw: '', variant: REQUEST_VARIANTS[variant].label, hint: 'Request never reached OpenRouter (offline, ad-blocker, or network policy).' };
+      logError(id, rec);
+      lastErr = rec;
+      if (attempt < 2) { await sleep(3000, signal); continue; }
+      break;
+    }
+    const { status: code, headers, body } = res;
+    const err = body?.error || body?.choices?.[0]?.error;
+    const pt = body?.usage?.prompt_tokens;
+    if (code === 200 && Number.isFinite(pt) && pt > 0) {
+      // Even if the completion failed, the prompt was tokenised and billed (at $0): usable.
+      let t = pt;
       if (S.source.value === 'generation' && body.id) {
         const n = await nativeTokens(body.id, signal);
         if (n != null) t = n;
       }
-      return { t, provider: body.provider || null, at: Date.now() };
+      state.variant[id] = variant;
+      return { t, provider: body.provider || null, at: Date.now(), variant };
     }
-    const msg = err?.message || `HTTP ${code}`;
-    const raw = JSON.stringify(err?.metadata ?? '');
+    const md = err?.metadata || {};
+    const msg = err?.message || (code === 200 ? 'Response had no usage data' : `HTTP ${code}`);
+    const raw = clip(md.raw ?? (md.reasons ? { reasons: md.reasons, flagged_input: md.flagged_input } : '') ?? '');
+    const rec = {
+      at: Date.now(), probe: probe.id, http: code, code: err?.code ?? null, message: msg,
+      provider: md.provider_name || body?.provider || null, raw, variant: REQUEST_VARIANTS[variant].label,
+      hint: errorHint(code, msg, raw || ''), id: body?.id || null,
+    };
+    logError(id, rec);
+    lastErr = rec;
+
     if (code === 429) {
       if (/per-day|per day|daily/i.test(msg + raw)) throw new Fatal('Daily free-model limit reached: ' + msg);
       const reset = Number(headers.get('x-ratelimit-reset'));
       const wait = Number.isFinite(reset) && reset > Date.now() ? Math.min(90000, reset - Date.now() + 500) : 15000 * (attempt + 1);
-      status(`rate limited, waiting ${Math.round(wait / 1000)}s…`);
+      status(`rate limited${rec.provider ? ` by ${rec.provider}` : ''}, waiting ${Math.round(wait / 1000)}s…`);
       await sleep(wait, signal);
       continue;
     }
     if (code === 402) throw new Fatal('402 Payment required. Stopping to protect the budget.');
     if (code === 401) throw new Fatal('401 Invalid API key.');
-    if (code === 400 && maxTokens === 1 && /max_tokens|max_output|minimum|at least/i.test(msg)) { maxTokens = 16; continue; }
-    if (code >= 500 && attempt < 2) { await sleep(4000, signal); continue; }
-    throw new Error(msg);
+    if (code === 404 || /data policy|no endpoints found/i.test(msg)) break; // retrying won't help
+    // Parameter problems or opaque provider errors: try the next request shape.
+    if (variant < REQUEST_VARIANTS.length - 1 && (code === 400 || code === 422 || code === 200 || /provider returned error/i.test(msg))) {
+      variant++;
+      status(`${id}: ${msg}${rec.provider ? ` (${rec.provider})` : ''}. Retrying with ${REQUEST_VARIANTS[variant].label}…`);
+      await sleep(1500, signal);
+      continue;
+    }
+    if (code >= 500 && attempt < 3) { await sleep(4000 * (attempt + 1), signal); continue; }
+    break;
   }
-  throw new Error('gave up after retries');
+  const e = new Error(summarize(lastErr));
+  e.rec = lastErr;
+  throw e;
+}
+
+function summarize(rec) {
+  if (!rec) return 'gave up after retries';
+  const parts = [rec.http ? `HTTP ${rec.http}` : null, rec.provider, rec.message].filter(Boolean);
+  return parts.join(' · ');
 }
 
 async function run() {
@@ -328,7 +409,7 @@ async function run() {
   try {
     for (const t of tasks) {
       if (ctl.signal.aborted) break;
-      if ((failedModels.get(t.id) || 0) >= 2) { done++; continue; }
+      if (failedModels.get(t.id)) { done++; continue; } // every request shape already failed once; retry on the next run
       status(`${t.id} ← ${t.pid} (${done + 1}/${tasks.length})`);
       try {
         const obs = await probeOnce(t.id, probeById.get(t.pid), ctl.signal, status);
@@ -338,6 +419,8 @@ async function run() {
         if (e instanceof Fatal || e.name === 'AbortError') throw e;
         failedModels.set(t.id, (failedModels.get(t.id) || 0) + 1);
         state.errors[t.id] = e.message;
+        // If every request shape failed, start from the first one again next run.
+        delete state.variant[t.id];
       }
       done++;
       saveCache();
@@ -364,7 +447,7 @@ $('#run').onclick = run;
 $('#stop').onclick = () => state.running?.abort();
 $('#clearCache').onclick = () => {
   if (!confirm('Forget all cached observations? Re-running will spend free requests again.')) return;
-  state.cache = {}; state.errors = {}; saveCache(); renderResults(); renderEstimate();
+  state.cache = {}; state.errors = {}; state.errlog = {}; state.variant = {}; saveCache(); renderResults(); renderEstimate();
 };
 
 // ---------- results ----------
@@ -383,7 +466,8 @@ function resultFor(id) {
   const res = Object.keys(obs).length ? classify(obs, state.ref) : null;
   const m = state.byId.get(id);
   const exp = m ? expectedFamily(m) : null;
-  return { id, m, obs, res, exp, err: state.errors[id] };
+  const log = state.errlog[id] || [];
+  return { id, m, obs, res, exp, err: state.errors[id], lastErr: state.errors[id] ? log[log.length - 1] : null, log };
 }
 function allResults() {
   const ids = new Set([...state.selected, ...Object.keys(state.cache), ...Object.keys(state.errors)]);
@@ -401,7 +485,7 @@ function renderResults() {
     const agree = r.exp && best && r.res.verdict !== 'unknown' ? (best.family === r.exp) : null;
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="mono">${esc(r.id)}${r.m?._stealth ? ' <span class="tag stealth">stealth?</span>' : ''}${r.err ? `<div class="small disagree">${esc(r.err)}</div>` : ''}</td>
+      <td class="mono">${esc(r.id)}${r.m?._stealth ? ' <span class="tag stealth">stealth?</span>' : ''}${r.err ? errorSnippet(r) : ''}</td>
       <td><span class="badge b-${v}">${v}</span>${r.res?.confidence ? `<div class="small muted">${Math.round(r.res.confidence * 100)}%</div>` : ''}</td>
       <td>${best ? (v === 'unknown' ? `<span class="muted">nearest:</span> ${esc(famName(best.family))}` : `<b>${esc(famName(best.family))}</b>`) + `<div class="small muted">err ${(best.relErr * 100).toFixed(1)}%, ${best.within1}/${best.n} probes ±1` +
         (r.res.runnerUp ? ` · next: ${esc(famName(r.res.runnerUp.family))} (Δ${r.res.runnerUp.score - best.score})` : '') + '</div>' : '—'}</td>
@@ -426,12 +510,46 @@ function renderResults() {
   if (state.detailId) showDetail(state.detailId, true);
 }
 
+function errorSnippet(r) {
+  const e = r.lastErr;
+  const raw = e?.raw ? `<div class="small muted mono-wrap">${esc(e.raw.slice(0, 180))}${e.raw.length > 180 ? '…' : ''}</div>` : '';
+  const hint = e?.hint ? `<div class="small">💡 ${esc(e.hint)}</div>` : '';
+  return `<div class="small disagree">${esc(r.err)}</div>${raw}${hint}`;
+}
+
+function errorDetail(r) {
+  if (!r.log?.length) return '';
+  const rows = [...r.log].reverse().map((e) => `<tr>
+      <td>${new Date(e.at).toLocaleTimeString()}</td><td>${esc(e.probe)}</td><td>${e.http || 'net'}</td>
+      <td>${esc(e.provider || '—')}</td><td>${esc(e.variant)}</td>
+      <td>${esc(e.message)}${e.code != null && e.code !== e.http ? ` <span class="muted">(code ${esc(e.code)})</span>` : ''}${e.hint ? `<div class="muted">💡 ${esc(e.hint)}</div>` : ''}</td></tr>`).join('');
+  const last = r.log[r.log.length - 1];
+  return `<h3 class="small">Errors (${r.log.length}${r.log.length >= 20 ? ', last 20' : ''})</h3>
+    <div class="table-wrap"><table class="err-table"><thead><tr><th>time</th><th>probe</th><th>HTTP</th><th>provider</th><th>request</th><th>message</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    ${last.raw ? `<p class="small muted">Raw provider response (latest):</p><pre class="raw">${esc(last.raw)}</pre>` : ''}
+    <div class="row"><button type="button" class="ghost small-btn" id="copyErr">Copy error log JSON</button>
+    <button type="button" class="ghost small-btn" id="clearErr">Clear errors for this model</button></div>`;
+}
+
+document.addEventListener('click', (ev) => {
+  const id = state.detailId;
+  if (!id) return;
+  if (ev.target.id === 'copyErr') {
+    navigator.clipboard?.writeText(JSON.stringify({ model: id, errors: state.errlog[id] || [] }, null, 2))
+      .then(() => { ev.target.textContent = 'Copied ✓'; }, () => { ev.target.textContent = 'Copy failed'; });
+  } else if (ev.target.id === 'clearErr') {
+    delete state.errlog[id]; delete state.errors[id]; delete state.variant[id];
+    saveCache(); renderResults(); showDetail(id, true);
+  }
+});
+
 function showDetail(id, quiet) {
   state.detailId = id;
   const r = resultFor(id);
   $('#detailCard').hidden = false;
   $('#detailTitle').textContent = id;
-  if (!r.res) { $('#detail').innerHTML = `<p class="muted">${esc(r.err || 'No observations yet.')}</p>`; return; }
+  if (!r.res) { $('#detail').innerHTML = errorDetail(r) || '<p class="muted">No observations yet.</p>'; return; }
   const top = r.res.rows.slice(0, 6);
   const probes = state.ref.probes.filter((p) => Number.isFinite(r.obs[p.id]));
   const cell = (e) => `<td class="${e === 0 ? 'r0' : Math.abs(e) <= 1 ? 'r1' : 'rN'}">${e > 0 ? '+' : ''}${e}</td>`;
@@ -447,6 +565,7 @@ function showDetail(id, quiet) {
       }).join('')}
       <tr><td><b>Σ|resid|</b></td><td></td>${top.map((t) => `<td><b>${t.absErr}</b></td>`).join('')}</tr></tbody>
     </table></div>
+    ${errorDetail(r)}
     <p class="small muted">Cells are residuals after fitting the template overhead (observed − reference − overhead). The true tokenizer has a column of zeros. ±1 can come from token merges at the template boundary.</p>`;
   if (!quiet) $('#detailCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
@@ -464,7 +583,7 @@ $('#exportJson').onclick = () => download('fingerprints.json', JSON.stringify(al
   verdict: r.res?.verdict ?? null, family: r.res?.best?.family ?? null, reference: r.res?.best?.id ?? null,
   rel_err: r.res?.best?.relErr ?? null, overhead: r.res?.best?.offset ?? null,
   runner_up: r.res?.runnerUp?.family ?? null, confidence: r.res?.confidence ?? null,
-  observations: r.obs, error: r.err ?? null, stealth_signals: r.m?._sig ?? [],
+  observations: r.obs, error: r.err ?? null, error_log: r.log, stealth_signals: r.m?._sig ?? [],
 })), null, 2), 'application/json');
 $('#exportCsv').onclick = () => {
   const head = ['model', 'verdict', 'family', 'reference', 'rel_err', 'overhead', 'runner_up', 'declared_tokenizer', 'expected_family', 'n_probes', ...state.ref.probes.map((p) => p.id)];

@@ -95,3 +95,9 @@ td.mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }
 .detail-table td, .detail-table th { text-align: right; font-family: var(--mono); font-size: 12px; }
 .detail-table td:first-child, .detail-table th:first-child { text-align: left; }
 footer { max-width: 1500px; margin: 0 auto; padding: 0 16px 24px; }
+
+.mono-wrap { font-family: var(--mono); word-break: break-all; }
+.err-table { font-size: 12px; }
+.err-table td { word-break: break-word; }
+pre.raw { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: 12px/1.4 var(--mono); white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto; }
+h3.small { margin: 12px 0 6px; }
