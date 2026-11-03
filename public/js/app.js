@@ -69,8 +69,7 @@ async function loadCatalog() {
     const j = await r.json();
     state.catalog = j.data.map((m) => ({ ...m, _free: isFree(m), _stealth: isStealth(m), _sig: stealthSignals(m) }));
     state.byId = new Map(state.catalog.map((m) => [m.id, m]));
-    // Drop selections that are no longer free / listed (safety).
-    for (const id of state.selected) if (!state.byId.get(id)?._free) state.selected.delete(id);
+    for (const id of state.selected) if (!state.byId.has(id)) state.selected.delete(id); // delisted
     saveSel();
     const nf = state.catalog.filter((m) => m._free).length;
     $('#catalogInfo').textContent = `${state.catalog.length} models · ${nf} free`;
@@ -149,21 +148,35 @@ function renderFacets() {
 
 // ---------- model list ----------
 const fmtDate = (s) => s ? new Date(s * 1000).toISOString().slice(0, 10) : '';
+const price = (m, k) => Math.max(0, Number(m.pricing?.[k]) || 0); // $ per token (or per request)
+const perM = (x) => { const v = x * 1e6; return v >= 10 ? v.toFixed(0) : v >= 0.1 ? v.toFixed(2) : v.toPrecision(2); };
+const fmtUsd = (x) => x === 0 ? '$0.00' : x < 0.0001 ? '<$0.0001' : '$' + x.toFixed(4);
+const PAID_MAX_TOKENS = 16; // paid models never get the larger retry shapes
+/** Upper-bound cost of one probe request (prompt ~ probe + 40 template tokens, completion = max_tokens). */
+function requestCost(m, probe) {
+  if (!m || m._free) return 0;
+  const counts = probe ? Object.values(probe.counts) : [60];
+  const promptTok = Math.max(...counts) + 40;
+  return promptTok * price(m, 'prompt') + PAID_MAX_TOKENS * (price(m, 'completion') + price(m, 'internal_reasoning')) + price(m, 'request');
+}
+function paidTag(m) {
+  const t = `$${perM(price(m, 'prompt'))}/M in · $${perM(price(m, 'completion'))}/M out` + (price(m, 'request') ? ` · $${price(m, 'request')}/req` : '');
+  return `<span class="tag paid" title="Costs money: ${esc(t)}">paid · ${esc(t)}</span>`;
+}
 function renderModels() {
   const list = visibleModels();
   const ul = $('#modelList');
   const frag = document.createDocumentFragment();
   for (const m of list.slice(0, 600)) {
     const li = document.createElement('li');
-    if (!m._free) li.className = 'locked';
     const tags = [
-      m._free ? '<span class="tag free">free</span>' : '<span class="tag paid" title="Blocked: costs money">paid · blocked</span>',
+      m._free ? '<span class="tag free">free</span>' : paidTag(m),
       m._stealth ? `<span class="tag stealth" title="${esc(m._sig.join('; '))}">stealth?</span>` : '',
       `<span class="tag">${esc(tokName(m))}</span>`,
       m.context_length ? `<span class="tag">${Math.round(m.context_length / 1000)}k ctx</span>` : '',
       m.created ? `<span class="tag">${fmtDate(m.created)}</span>` : '',
     ].join('');
-    li.innerHTML = `<input type="checkbox" ${state.selected.has(m.id) ? 'checked' : ''} ${m._free ? '' : 'disabled'} aria-label="select ${esc(m.id)}">
+    li.innerHTML = `<input type="checkbox" ${state.selected.has(m.id) ? 'checked' : ''} aria-label="select ${esc(m.id)}">
       <div><div>${esc(m.name)}</div><div class="mid muted">${esc(m.id)}</div><div class="meta">${tags}</div></div>`;
     li.querySelector('input').onchange = (e) => {
       e.target.checked ? state.selected.add(m.id) : state.selected.delete(m.id);
@@ -182,7 +195,7 @@ function renderSelInfo(nVisible) {
 }
 
 document.querySelectorAll('[data-mass]').forEach((b) => b.addEventListener('click', () => {
-  const vis = visibleModels().filter((m) => m._free);
+  const vis = visibleModels();
   switch (b.dataset.mass) {
     case 'allFree': state.catalog.filter((m) => m._free && (!F.text.checked || isText(m))).forEach((m) => state.selected.add(m.id)); break;
     case 'visible': vis.forEach((m) => state.selected.add(m.id)); break;
@@ -221,7 +234,7 @@ $('#probeDefault').onclick = () => { state.probes = new Set(state.ref.defaultPro
 $('#probeAll').onclick = () => { state.probes = new Set(state.ref.probes.map((p) => p.id)); store.set('probes', [...state.probes]); renderProbes(); };
 
 // ---------- settings ----------
-const S = { source: $('#tokenSource'), delay: $('#delay'), budget: $('#dailyBudget'), guard: $('#spendGuard') };
+const S = { source: $('#tokenSource'), delay: $('#delay'), budget: $('#dailyBudget'), maxSpend: $('#maxSpend') };
 const savedS = store.get('settings', {});
 for (const [k, el] of Object.entries(S)) {
   if (savedS[k] !== undefined) el.type === 'checkbox' ? (el.checked = savedS[k]) : (el.value = savedS[k]);
@@ -235,21 +248,33 @@ function pendingTasks() {
   const tasks = [];
   for (const id of state.selected) {
     const m = state.byId.get(id);
-    if (!m?._free) continue;
-    for (const pid of state.probes) if (!state.cache[id]?.[pid]) tasks.push({ id, pid });
+    if (!m) continue;
+    for (const pid of state.probes) if (!state.cache[id]?.[pid]) tasks.push({ id, pid, paid: !m._free });
   }
   return tasks;
 }
+function estimateCost(tasks) {
+  const probeById = new Map(state.ref.probes.map((p) => [p.id, p]));
+  return tasks.reduce((a, t) => a + (t.paid ? requestCost(state.byId.get(t.id), probeById.get(t.pid)) : 0), 0);
+}
 function renderEstimate() {
   if (!state.ref) return;
-  const n = pendingTasks().length;
+  const tasks = pendingTasks();
+  const n = tasks.length;
+  const nPaid = tasks.filter((t) => t.paid).length;
+  const nFree = n - nPaid;
+  const cost = estimateCost(tasks);
+  const cap = Number(S.maxSpend.value) || 0;
   const extra = S.source.value === 'generation' ? ' (+ the same number of free /generation lookups)' : '';
   const budget = Number(S.budget.value) || 50;
   const mins = Math.ceil((n * Number(S.delay.value)) / 60000);
+  const warns = [];
+  if (nFree > budget) warns.push(`⚠ ${nFree} free requests is more than your daily free budget (${budget}). The run will stop when OpenRouter returns a daily-limit 429. Cached results are kept, so you can resume tomorrow.`);
+  if (nPaid && cost > cap) warns.push(`⚠ Estimated paid cost (up to ${fmtUsd(cost)}) is above your max spend per run (${fmtUsd(cap)}). The run will stop once actual spend reaches the cap.`);
   const el = $('#estimate');
-  el.className = 'estimate' + (n > budget ? ' warn' : '');
-  el.innerHTML = `<b>${n}</b> uncached requests to free models${extra} · ~${mins} min · cost <b>$0.00</b>` +
-    (n > budget ? `<br>⚠ This is more than your daily free budget (${budget}). The run will stop when OpenRouter returns a daily-limit 429. Cached results are kept, so you can resume tomorrow.` : '');
+  el.className = 'estimate' + (warns.length ? ' warn' : '');
+  el.innerHTML = `<b>${n}</b> uncached requests (${nFree} free, <b>${nPaid} paid</b>)${extra} · ~${mins} min · ` +
+    `estimated cost <b>${nPaid ? 'up to ' + fmtUsd(cost) : '$0.00'}</b>` + (warns.length ? '<br>' + warns.join('<br>') : '');
 }
 
 // ---------- runner ----------
@@ -267,7 +292,8 @@ const REQUEST_VARIANTS = [
 async function callModel(model, text, signal, variant = 0) {
   // HARD SPENDING GUARD: re-check right before every request.
   const m = state.byId.get(model);
-  if (!m || !isFree(m)) throw new Fatal(`refusing non-free model ${model}`);
+  if (!m) throw new Fatal(`refusing unlisted model ${model}`);
+  if (!isFree(m) && REQUEST_VARIANTS[variant].body.max_tokens > PAID_MAX_TOKENS) throw new Fatal(`refusing max_tokens > ${PAID_MAX_TOKENS} on paid model ${model}`);
   const r = await fetch(`${API}/chat/completions`, {
     method: 'POST', signal,
     headers: {
@@ -371,7 +397,8 @@ async function probeOnce(id, probe, signal, status) {
     if (code === 401) throw new Fatal('401 Invalid API key.');
     if (code === 404 || /data policy|no endpoints found/i.test(msg)) break; // retrying won't help
     // Parameter problems or opaque provider errors: try the next request shape.
-    if (variant < REQUEST_VARIANTS.length - 1 && (code === 400 || code === 422 || code === 200 || /provider returned error/i.test(msg))) {
+    const maxVariant = state.byId.get(id)?._free ? REQUEST_VARIANTS.length - 1 : REQUEST_VARIANTS.findLastIndex((v) => v.body.max_tokens <= PAID_MAX_TOKENS);
+    if (variant < maxVariant && (code === 400 || code === 422 || code === 200 || /provider returned error/i.test(msg))) {
       variant++;
       status(`${id}: ${msg}${rec.provider ? ` (${rec.provider})` : ''}. Retrying with ${REQUEST_VARIANTS[variant].label}…`);
       await sleep(1500, signal);
@@ -400,16 +427,25 @@ async function run() {
   $('#run').disabled = true; $('#stop').disabled = false;
   const status = (s) => { $('#status').textContent = s; };
   const probeById = new Map(state.ref.probes.map((p) => [p.id, p]));
+  const cap = Math.max(0, Number(S.maxSpend.value) || 0);
+  const est = estimateCost(tasks);
+  if (est > cap && !confirm(`Estimated paid cost is up to ${fmtUsd(est)}, above your max spend per run (${fmtUsd(cap)}).\n\nThe run will stop once actual spend reaches the cap. Continue?`)) { stopUi(); return; }
+  const hasPaid = tasks.some((x) => x.paid);
   let usage0 = null;
-  if (S.guard.checked) {
-    try { usage0 = Number((await keyInfo()).usage); } catch (e) { status('Key check failed: ' + e.message); stopUi(); return; }
-  }
+  try { usage0 = Number((await keyInfo()).usage); } catch (e) { status('Key check failed: ' + e.message); stopUi(); return; }
+  const spent = async () => Number((await keyInfo()).usage) - usage0;
+  let lastSpent = 0;
   const failedModels = new Map();
   let done = 0;
   try {
     for (const t of tasks) {
       if (ctl.signal.aborted) break;
       if (failedModels.get(t.id)) { done++; continue; } // every request shape already failed once; retry on the next run
+      if (t.paid) {
+        // Don't start a paid request that could push spend past the cap.
+        const next = requestCost(state.byId.get(t.id), probeById.get(t.pid));
+        if (lastSpent + next > cap) throw new Fatal(`Next paid request (up to ${fmtUsd(next)}) would exceed the max spend per run (${fmtUsd(cap)}; spent ${fmtUsd(lastSpent)}). Stopped by the spend guard.`);
+      }
       status(`${t.id} ← ${t.pid} (${done + 1}/${tasks.length})`);
       try {
         const obs = await probeOnce(t.id, probeById.get(t.pid), ctl.signal, status);
@@ -426,9 +462,12 @@ async function run() {
       saveCache();
       $('#bar').style.width = `${(100 * done) / tasks.length}%`;
       renderResults();
-      if (S.guard.checked && usage0 != null && done % 10 === 0) {
-        const u = Number((await keyInfo()).usage);
-        if (u > usage0 + 1e-9) throw new Fatal(`Key usage rose from $${usage0} to $${u}. Aborted by the spend guard.`);
+      // Spend guard: checked after every paid request, and every 10 free ones (free should never cost).
+      if (t.paid || done % 10 === 0) {
+        const d = await spent();
+        lastSpent = Math.max(lastSpent, d);
+        if (!hasPaid && d > 1e-9) throw new Fatal(`Key usage rose by ${fmtUsd(d)} on a free-only run. Aborted by the spend guard.`);
+        if (d > 1e-9 && d >= cap) throw new Fatal(`Spent ${fmtUsd(d)} this run, reaching the max spend per run (${fmtUsd(cap)}). Stopped by the spend guard.`);
       }
       await sleep(Number(S.delay.value) || 3200, ctl.signal);
     }
@@ -436,8 +475,8 @@ async function run() {
   } catch (e) {
     status(e.name === 'AbortError' ? 'Stopped.' : '⛔ ' + e.message);
   } finally {
-    if (S.guard.checked && usage0 != null) {
-      keyInfo().then((d) => { if (Number(d.usage) > usage0 + 1e-9) status(`⚠ key usage changed: $${usage0} → $${d.usage}`); }).catch(() => {});
+    if (usage0 != null) {
+      spent().then((d) => { if (d > 1e-9) $('#status').textContent += ` · spent ${fmtUsd(d)} this run`; }).catch(() => {});
     }
     stopUi(); saveCache(); renderResults(); renderEstimate();
   }
@@ -485,7 +524,7 @@ function renderResults() {
     const agree = r.exp && best && r.res.verdict !== 'unknown' ? (best.family === r.exp) : null;
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="mono">${esc(r.id)}${r.m?._stealth ? ' <span class="tag stealth">stealth?</span>' : ''}${r.err ? errorSnippet(r) : ''}</td>
+      <td class="mono">${esc(r.id)}${r.m?._stealth ? ' <span class="tag stealth">stealth?</span>' : ''}${r.m && !r.m._free ? ' <span class="tag paid">paid</span>' : ''}${r.err ? errorSnippet(r) : ''}</td>
       <td><span class="badge b-${v}">${v}</span>${r.res?.confidence ? `<div class="small muted">${Math.round(r.res.confidence * 100)}%</div>` : ''}</td>
       <td>${best ? (v === 'unknown' ? `<span class="muted">nearest:</span> ${esc(famName(best.family))}` : `<b>${esc(famName(best.family))}</b>`) + `<div class="small muted">err ${(best.relErr * 100).toFixed(1)}%, ${best.within1}/${best.n} probes ±1` +
         (r.res.runnerUp ? ` · next: ${esc(famName(r.res.runnerUp.family))} (Δ${r.res.runnerUp.score - best.score})` : '') + '</div>' : '—'}</td>

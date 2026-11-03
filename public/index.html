@@ -11,7 +11,7 @@
 <header class="top">
   <div>
     <h1>Tokenizer Fingerprinter</h1>
-    <p class="sub">Identify which tokenizer family a model uses (and so, likely, who built it) from the prompt-token counts its API reports. Free OpenRouter models only.</p>
+    <p class="sub">Identify which tokenizer family a model uses (and so, likely, who built it) from the prompt-token counts its API reports. Free models cost nothing; paid models are marked and capped by a per-run spend limit.</p>
   </div>
   <div class="keybox">
     <label for="apiKey">OpenRouter key</label>
@@ -106,7 +106,9 @@
           <label class="small">Daily free-request budget
             <input id="dailyBudget" type="number" min="1" value="50">
           </label>
-          <label class="chk small"><input type="checkbox" id="spendGuard" checked> Abort if key usage ($) increases</label>
+          <label class="small">Max spend per run ($, paid models)
+            <input id="maxSpend" type="number" min="0" step="0.005" value="0.01">
+          </label>
         </div>
       </details>
 

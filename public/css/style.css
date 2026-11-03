@@ -57,7 +57,6 @@ button.ghost { background: transparent; }
 .mass { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 6px; }
 .models { list-style: none; margin: 8px 0 0; padding: 0; max-height: 62vh; overflow: auto; border-top: 1px solid var(--line); }
 .models li { display: grid; grid-template-columns: auto 1fr; gap: 8px; padding: 7px 4px; border-bottom: 1px solid var(--line); }
-.models li.locked { opacity: .55; }
 .models .mid { font-family: var(--mono); font-size: 12px; word-break: break-all; }
 .models .meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
 .tag { white-space: nowrap; font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }

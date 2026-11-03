@@ -1,6 +1,6 @@
 # Tokenizer Fingerprinter
 
-A static web app that classifies new and **stealth LLMs** on OpenRouter by their **tokenizer**. It sends a handful of carefully chosen probe strings, reads the prompt-token counts the API reports, and matches them against ten reference tokenizer families. **It only ever calls free models.**
+A static web app that classifies new and **stealth LLMs** on OpenRouter by their **tokenizer**. It sends a handful of carefully chosen probe strings, reads the prompt-token counts the API reports, and matches them against ten reference tokenizer families. Free models cost nothing; paid models are marked with their price and capped by a per-run spend limit.
 
 See [RESEARCH.md](RESEARCH.md) for the method, validation and caveats.
 
@@ -16,12 +16,13 @@ Then open <http://localhost:5173>. Any static host also works, because the app i
 2. Pick models. Filter by search text, free only, stealth candidates, vendor, declared tokenizer, age or output modality. Mass-select with **Select all free**, **Select visible**, **Select stealth**, **1 per vendor**, **Invert visible** or **Clear**.
 3. Press **Run fingerprint**. Results are cached per model and probe, so re-runs and re-scoring are free.
 
-## Budget safety
+## Costs and budget safety
 
-- Paid models are shown but can't be selected. Before **every** request the app re-checks that *every* price field of the model is `0`, and refuses otherwise.
-- Requests use `max_tokens: 1` and `temperature: 0`.
-- **Spend guard** (on by default): the app reads your key's `usage` before the run and every 10 requests, and aborts if it ever increases. It also stops on HTTP 402.
-- Free-tier limits: about 20 req/min (the default delay is 3.2 s) and about 50 req/day on keys with less than $10 of credit purchased. A daily-limit 429 stops the run cleanly. With the default 8 probes, that's about 6 models per day; the estimate box shows the count before you start.
+- **Free models** (every price field `0`) cost nothing and are tagged `free`.
+- **Paid models** can be selected too. They're tagged with their price (e.g. `paid · $1.25/M in · $10/M out`). The run estimate shows free vs. paid requests and an upper-bound cost. One probe on a typical paid model costs a fraction of a cent.
+- Requests use `max_tokens: 1`. Paid models are never retried with more than 16 output tokens.
+- **Max spend per run** (Settings, default $0.01): the app reads your key's `usage` before the run and after every paid request. It won't start a paid request that could push spend past the cap. A free-only run aborts if usage rises at all. HTTP 402 always stops the run. OpenRouter may update `usage` with a short delay, so treat the cap as best-effort. A spending limit on the key itself is the hard backstop.
+- Free-model limits: about 20 req/min (the default delay is 3.2 s). About 50 req/day if you've bought less than $10 of credits in total, about 1,000/day otherwise. A daily-limit 429 stops the run cleanly and cached results are kept.
 
 ## Develop
 
