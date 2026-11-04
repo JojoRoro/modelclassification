@@ -330,13 +330,17 @@ async function nativeTokens(genId, signal) {
 const clip = (x, n = 1500) => { const t = typeof x === 'string' ? x : JSON.stringify(x); return t && t.length > n ? t.slice(0, n) + '…' : t; };
 
 /** Best-effort plain-language explanation of an OpenRouter / provider error. */
+const REGION_RE = /not available in your (region|country|location)|unsupported (region|country|location)|region (is )?not supported|geo-?(restrict|block)|country.{0,20}not (supported|allowed)/i;
+
 function errorHint(http, msg, raw) {
   const t = `${msg} ${raw}`.toLowerCase();
+  if (REGION_RE.test(t)) return 'Geo-restricted: the provider does not serve requests from your region. This is the provider\'s policy, not this app. Retrying won\'t help; skip this model.';
   if (/data policy|privacy|training|publication|logging/.test(t)) return 'Model needs a privacy opt-in: enable free-model training/logging in OpenRouter Settings → Privacy (stealth models usually require this).';
   if (/no endpoints found|not a valid model|model not found|does not exist/.test(t) || http === 404) return 'No available endpoint for this model (removed, renamed, or blocked by your provider/privacy settings).';
   if (/max_tokens|max_completion|max_output|minimum|at least \d+/.test(t)) return 'Provider rejects this max_tokens value; retried with larger values.';
   if (/temperature/.test(t)) return 'Provider rejects the temperature parameter; retried without it.';
-  if (/moderation|flagged|safety|content policy/.test(t) || http === 403) return 'Prompt was blocked by moderation. Try deselecting this probe.';
+  if (/moderation|flagged|safety|content policy/.test(t)) return 'Prompt was blocked by moderation. Try deselecting this probe.';
+  if (http === 403) return 'Forbidden by the provider (access restriction). Check the raw message; retrying with other settings won\'t help.';
   if (/context|too long|token limit/.test(t)) return 'Prompt too long for this endpoint.';
   if (/timeout|timed out/.test(t) || http === 408) return 'Provider timed out.';
   if (/overloaded|capacity|unavailable|busy/.test(t) || http === 502 || http === 503) return 'Provider overloaded or down. Retry later.';
@@ -402,7 +406,8 @@ async function probeOnce(id, probe, signal, status) {
     }
     if (code === 402) throw new Fatal('402 Payment required. Stopping to protect the budget.');
     if (code === 401) throw new Fatal('401 Invalid API key.');
-    if (code === 404 || /data policy|no endpoints found/i.test(msg)) break; // retrying won't help
+    // Retrying with another request shape won't help for these.
+    if (code === 404 || code === 403 || REGION_RE.test(msg + ' ' + raw) || /data policy|no endpoints found/i.test(msg)) break;
     // Parameter problems or opaque provider errors: try the next request shape.
     const maxVariant = state.byId.get(id)?._free ? REQUEST_VARIANTS.length - 1 : REQUEST_VARIANTS.findLastIndex((v) => v.body.max_tokens <= PAID_MAX_TOKENS);
     if (variant < maxVariant && (code === 400 || code === 422 || code === 200 || /provider returned error/i.test(msg))) {
