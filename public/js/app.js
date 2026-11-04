@@ -3,7 +3,7 @@ import {
   mergeSignatures, signatureFromObservations, signatureFromTokenizer, clusterByTokenizer,
 } from './classify.js';
 
-const API = 'https://openrouter.ai/api/v1';
+const OR_API = 'https://openrouter.ai/api/v1';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const sleep = (ms, signal) => new Promise((res, rej) => {
@@ -12,10 +12,17 @@ const sleep = (ms, signal) => new Promise((res, rej) => {
 });
 
 // ---------- persistence (all optional; page works without storage) ----------
-const store = {
-  get(k, d) { try { const v = localStorage.getItem('tf.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem('tf.' + k, JSON.stringify(v)); } catch { /* ignore */ } },
-};
+const makeStore = (prefix) => ({
+  get(k, d) { try { const v = localStorage.getItem(prefix + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(prefix + k, JSON.stringify(v)); } catch { /* ignore */ } },
+});
+// Signatures, the HF token and the backend choice are shared. Everything tied to
+// model ids (selection, cache, errors, key, settings) is kept per backend, because
+// a LiteLLM model name can mean something different from an OpenRouter id.
+const shared = makeStore('tf.');
+const BACKEND = shared.get('backend', 'openrouter') === 'litellm' ? 'litellm' : 'openrouter';
+const IS_LL = BACKEND === 'litellm';
+const store = IS_LL ? makeStore('tf.litellm.') : shared;
 
 const state = {
   catalog: [], byId: new Map(), ref: null,
@@ -27,7 +34,7 @@ const state = {
   errlog: store.get('errlog', {}),    // modelId -> [{at, probe, http, code, message, provider, raw, hint, variant}]
   variant: store.get('variant', {}),  // modelId -> index into REQUEST_VARIANTS that worked
   deep: new Set(store.get('deep', [])), // models to probe with the whole probe pool
-  sigBundled: [], sigUser: store.get('signatures', []), refEff: null,
+  sigBundled: [], sigUser: shared.get('signatures', []), refEff: null,
   running: null, detailId: null,
 };
 const saveSel = () => store.set('selected', [...state.selected]);
@@ -36,49 +43,152 @@ const saveCache = () => {
   store.set('errlog', state.errlog); store.set('variant', state.variant);
 };
 
-// ---------- API key ----------
+// ---------- backend + API key ----------
 const keyInput = $('#apiKey');
+const urlInput = $('#baseUrl');
 keyInput.value = store.get('key', '');
+urlInput.value = store.get('baseUrl', '');
 keyInput.addEventListener('change', () => store.set('key', keyInput.value.trim()));
+urlInput.addEventListener('change', () => { store.set('baseUrl', urlInput.value.trim()); loadCatalog(); });
 $('#toggleKey').onclick = () => { keyInput.type = keyInput.type === 'password' ? 'text' : 'password'; };
 const key = () => keyInput.value.trim();
+/** LiteLLM base URL without a trailing slash or /v1. */
+const llBase = () => urlInput.value.trim().replace(/\/+$/, '').replace(/\/v1$/, '');
 
+$('#backend').value = BACKEND;
+$('#backend').onchange = (e) => { shared.set('backend', e.target.value); location.reload(); };
+document.body.classList.toggle('ll', IS_LL);
+if (IS_LL) {
+  $('#urlRow').hidden = false;
+  $('#keyLabel').textContent = 'LiteLLM key';
+  keyInput.placeholder = 'sk-…';
+  $('#keyInfo').textContent = 'URL and key stay in this browser (localStorage). The key is sent only to the proxy URL above.';
+  $('#facetALabel').textContent = 'Provider';
+  $('#facetBLabel').textContent = 'Mode';
+  $('#perVendorBtn').textContent = '1 per provider';
+  $('#fFree').checked = false; // list every model id the proxy exposes
+  $('#fText').parentElement.lastChild.textContent = ' Chat models';
+  document.title = 'Tokenizer Fingerprinter · LiteLLM';
+}
+
+/** Backend-neutral key/usage info: { label, usage (number|null), limit, extra }. */
 async function keyInfo() {
-  const r = await fetch(`${API}/key`, { headers: { Authorization: `Bearer ${key()}` } });
+  if (IS_LL) {
+    if (!llBase()) throw new Error('enter the LiteLLM proxy URL first');
+    const h = { Authorization: `Bearer ${key()}` };
+    const r = await fetch(`${llBase()}/key/info`, { headers: h });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j?.info) {
+      const i = j.info;
+      return { label: i.key_alias || i.key_name || 'key', usage: Number(i.spend ?? 0), limit: i.max_budget ?? null,
+        extra: [i.rpm_limit ? `${i.rpm_limit} rpm` : '', i.tpm_limit ? `${i.tpm_limit} tpm` : ''].filter(Boolean).join(' · ') };
+    }
+    // Master keys or proxies without a database have no /key/info. Fall back to a models call.
+    const m = await fetch(`${llBase()}/v1/models`, { headers: h });
+    const mj = await m.json().catch(() => ({}));
+    if (!m.ok) throw new Error(errText(mj) || `HTTP ${m.status}`);
+    return { label: 'key', usage: null, limit: null, extra: 'no spend tracking (/key/info unavailable)' };
+  }
+  const r = await fetch(`${OR_API}/key`, { headers: { Authorization: `Bearer ${key()}` } });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
-  return j.data;
+  const d = j.data;
+  return { label: d.label || 'key', usage: Number(d.usage ?? 0), limit: d.limit ?? null,
+    extra: [d.is_free_tier ? 'free tier (≈50 free req/day)' : '', d.rate_limit ? `${d.rate_limit.requests}/${d.rate_limit.interval}` : ''].filter(Boolean).join(' · ') };
 }
+const errText = (j) => typeof j?.error === 'string' ? j.error : j?.error?.message || j?.detail?.error || (typeof j?.detail === 'string' ? j.detail : '');
 $('#checkKey').onclick = async () => {
   store.set('key', key());
+  if (IS_LL) store.set('baseUrl', urlInput.value.trim());
   const el = $('#keyInfo');
   if (!key()) { el.textContent = 'Paste a key first.'; return; }
   el.textContent = 'Checking…';
   try {
     const d = await keyInfo();
-    el.innerHTML = `✓ ${esc(d.label || 'key')} · used $${Number(d.usage ?? 0).toFixed(4)}` +
-      (d.limit != null ? ` of $${Number(d.limit).toFixed(2)}` : '') +
-      (d.is_free_tier ? ' · free tier (≈50 free req/day)' : '') +
-      (d.rate_limit ? ` · ${esc(d.rate_limit.requests)}/${esc(d.rate_limit.interval)}` : '');
+    el.innerHTML = `✓ ${esc(d.label)}` + (d.usage != null ? ` · used $${d.usage.toFixed(4)}` : '') +
+      (d.limit != null ? ` of $${Number(d.limit).toFixed(2)}` : '') + (d.extra ? ` · ${esc(d.extra)}` : '');
+    if (IS_LL) loadCatalog();
   } catch (e) { el.textContent = '✗ ' + e.message; }
 };
 
 // ---------- catalog ----------
-const vendorOf = (m) => m.id.split('/')[0];
-const isText = (m) => (m.architecture?.output_modalities ?? ['text']).includes('text');
+// Facet A = vendor (OpenRouter) / provider (LiteLLM); facet B = declared tokenizer / mode.
+const vendorOf = (m) => m._provider ?? m.id.split('/')[0];
+const isText = (m) => IS_LL ? ['chat', 'completion', 'responses', undefined].includes(m._mode) : (m.architecture?.output_modalities ?? ['text']).includes('text');
 const isStealth = (m) => { const s = stealthSignals(m); return s.some((x) => x.startsWith('openrouter/stealth')) || s.length >= 2; };
+/** Expected family; LiteLLM models are matched on their upstream model string. */
+const expFor = (m) => m ? expectedFamily(m._upstream ? { ...m, id: m._upstream } : m) : null;
+
+/** Upstream "provider/model" from a LiteLLM deployment, e.g. "anthropic/claude-sonnet-4-5". */
+function llUpstream(lp = {}, mi = {}) {
+  const raw = String(lp.model || mi.key || '');
+  const prov = mi.litellm_provider || lp.custom_llm_provider || (raw.includes('/') ? raw.split('/')[0] : '');
+  const bare = raw.startsWith(prov + '/') ? raw.slice(prov.length + 1) : raw;
+  return { provider: prov || 'unknown', upstream: bare.includes('/') ? bare : prov ? `${prov}/${bare}` : bare };
+}
+
+async function loadLiteLLMCatalog() {
+  if (!llBase()) throw new Error('enter the LiteLLM proxy URL and press Check');
+  const h = key() ? { Authorization: `Bearer ${key()}` } : {};
+  const [mr, ir] = await Promise.allSettled([
+    fetch(`${llBase()}/v1/models`, { headers: h }).then(async (r) => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(errText(j) || `HTTP ${r.status}`); return j; }),
+    fetch(`${llBase()}/model/info`, { headers: h }).then(async (r) => (r.ok ? r.json() : { data: [] })),
+  ]);
+  if (mr.status === 'rejected' && (ir.status === 'rejected' || !ir.value?.data?.length)) throw mr.reason;
+  const byName = new Map();
+  const add = (name) => {
+    if (!byName.has(name)) byName.set(name, { id: name, deployments: [], owned_by: null, created: null });
+    return byName.get(name);
+  };
+  for (const d of (ir.status === 'fulfilled' ? ir.value?.data : null) || []) {
+    if (!d?.model_name || d.model_name.includes('*')) continue; // wildcard routes are expanded by /v1/models
+    add(d.model_name).deployments.push(d);
+  }
+  for (const d of (mr.status === 'fulfilled' ? mr.value?.data : null) || []) {
+    const e = add(d.id); e.owned_by = d.owned_by; e.created = d.created;
+  }
+  return [...byName.values()].map((e) => {
+    const infos = e.deployments.map((d) => ({ ...llUpstream(d.litellm_params, d.model_info), mi: d.model_info || {} }));
+    const first = infos[0] || llUpstream({ model: e.id.includes('/') ? e.id : '' }, { litellm_provider: e.id.includes('/') ? e.id.split('/')[0] : e.owned_by && e.owned_by !== 'openai' ? e.owned_by : '' });
+    const mi = infos[0]?.mi || {};
+    const num = (x) => (x == null || x === '' ? null : Number(x));
+    const inP = num(mi.input_cost_per_token), outP = num(mi.output_cost_per_token);
+    const pricing = inP == null && outP == null ? {} : { prompt: inP ?? 0, completion: outP ?? 0 };
+    const providers = [...new Set(infos.map((x) => x.provider))];
+    const upstreams = [...new Set(infos.map((x) => x.upstream))];
+    return {
+      id: e.id, name: e.id, created: null,
+      description: upstreams.length ? `→ ${upstreams.join(', ')}` : '',
+      context_length: num(mi.max_input_tokens) || num(mi.max_tokens) || null,
+      pricing, architecture: { tokenizer: providers.join('+') || first.provider },
+      _provider: providers.length > 1 ? 'mixed' : first.provider,
+      _providers: providers.length ? providers : [first.provider],
+      _upstream: first.upstream, _upstreams: upstreams,
+      _mode: mi.mode, _priceKnown: inP != null || outP != null,
+    };
+  });
+}
 
 async function loadCatalog() {
   try {
-    const r = await fetch(`${API}/models`);
-    const j = await r.json();
-    state.catalog = j.data.map((m) => ({ ...m, _free: isFree(m), _stealth: isStealth(m), _sig: stealthSignals(m) }));
+    $('#catalogInfo').textContent = 'loading catalog…';
+    let list;
+    if (IS_LL) {
+      list = (await loadLiteLLMCatalog()).map((m) => ({ ...m, _free: isFree(m), _stealth: false, _sig: [] }));
+    } else {
+      const r = await fetch(`${OR_API}/models`);
+      const j = await r.json();
+      list = j.data.map((m) => ({ ...m, _free: isFree(m), _stealth: isStealth(m), _sig: stealthSignals(m) }));
+    }
+    state.catalog = list;
     state.byId = new Map(state.catalog.map((m) => [m.id, m]));
     for (const id of state.selected) if (!state.byId.has(id)) state.selected.delete(id); // delisted
     saveSel();
     const nf = state.catalog.filter((m) => m._free).length;
-    $('#catalogInfo').textContent = `${state.catalog.length} models · ${nf} free`;
+    const np = new Set(state.catalog.flatMap((m) => m._providers || [])).size;
+    $('#catalogInfo').textContent = `${state.catalog.length} models · ${nf} free` + (IS_LL ? ` · ${np} providers` : '');
   } catch (e) {
+    state.catalog = []; state.byId = new Map();
     $('#catalogInfo').textContent = 'Could not load catalog: ' + e.message;
   }
   renderFacets(); renderModels(); renderResults();
@@ -108,10 +218,10 @@ function baseFilter(m) {
   const age = Number(F.age.value);
   if (age && (!m.created || Date.now() / 1000 - m.created > age * 86400)) return false;
   const q = F.q.value.trim().toLowerCase();
-  if (q && !`${m.id} ${m.name} ${m.description}`.toLowerCase().includes(q)) return false;
+  if (q && !`${m.id} ${m.name} ${m.description} ${m._providers?.join(' ') ?? ''}`.toLowerCase().includes(q)) return false;
   return true;
 }
-const tokName = (m) => m.architecture?.tokenizer || 'none';
+const tokName = (m) => IS_LL ? (m._mode || 'unknown') : (m.architecture?.tokenizer || 'none');
 function visibleModels() {
   const list = state.catalog.filter((m) => baseFilter(m)
     && (!state.vendors.size || state.vendors.has(vendorOf(m)))
@@ -119,8 +229,8 @@ function visibleModels() {
   const s = F.sort.value;
   const cmp = {
     new: (a, b) => (b.created || 0) - (a.created || 0),
-    name: (a, b) => a.name.localeCompare(b.name),
-    vendor: (a, b) => a.id.localeCompare(b.id),
+    name: (a, b) => String(a.name).localeCompare(String(b.name)),
+    vendor: (a, b) => vendorOf(a).localeCompare(vendorOf(b)) || a.id.localeCompare(b.id),
     ctx: (a, b) => (b.context_length || 0) - (a.context_length || 0),
   }[s];
   return list.sort(cmp);
@@ -165,6 +275,15 @@ function requestCost(m, probe) {
   const promptTok = Math.max(...counts) + 40;
   return promptTok * price(m, 'prompt') + PAID_MAX_TOKENS * (price(m, 'completion') + price(m, 'internal_reasoning')) + price(m, 'request');
 }
+function priceTag(m) {
+  if (m._free) return '<span class="tag free">free</span>';
+  if (IS_LL && !m._priceKnown) return '<span class="tag paid" title="The proxy reports no price for this model. Spend is guarded only by LiteLLM spend tracking.">price unknown</span>';
+  return paidTag(m);
+}
+function providerTag(m) {
+  if (!IS_LL) return '';
+  return `<span class="tag prov" title="LiteLLM provider · upstream ${esc((m._upstreams || []).join(', ') || '?')}">${esc((m._providers || [m._provider]).join(' + '))}</span>`;
+}
 function paidTag(m) {
   const t = `$${perM(price(m, 'prompt'))}/M in · $${perM(price(m, 'completion'))}/M out` + (price(m, 'request') ? ` · $${price(m, 'request')}/req` : '');
   return `<span class="tag paid" title="Costs money: ${esc(t)}">paid · ${esc(t)}</span>`;
@@ -176,14 +295,15 @@ function renderModels() {
   for (const m of list.slice(0, 600)) {
     const li = document.createElement('li');
     const tags = [
-      m._free ? '<span class="tag free">free</span>' : paidTag(m),
+      providerTag(m),
+      priceTag(m),
       m._stealth ? `<span class="tag stealth" title="${esc(m._sig.join('; '))}">stealth?</span>` : '',
-      `<span class="tag">${esc(tokName(m))}</span>`,
+      IS_LL ? (m._mode ? `<span class="tag">${esc(m._mode)}</span>` : '') : `<span class="tag">${esc(tokName(m))}</span>`,
       m.context_length ? `<span class="tag">${Math.round(m.context_length / 1000)}k ctx</span>` : '',
       m.created ? `<span class="tag">${fmtDate(m.created)}</span>` : '',
     ].join('');
     li.innerHTML = `<input type="checkbox" ${state.selected.has(m.id) ? 'checked' : ''} aria-label="select ${esc(m.id)}">
-      <div><div>${esc(m.name)}</div><div class="mid muted">${esc(m.id)}</div><div class="meta">${tags}</div></div>`;
+      <div><div>${esc(m.name)}</div><div class="mid muted">${esc(IS_LL ? m.description : m.id)}</div><div class="meta">${tags}</div></div>`;
     li.querySelector('input').onchange = (e) => {
       e.target.checked ? state.selected.add(m.id) : state.selected.delete(m.id);
       saveSel(); renderSelInfo();
@@ -272,11 +392,13 @@ function renderEstimate() {
   const nFree = n - nPaid;
   const cost = estimateCost(tasks);
   const cap = Number(S.maxSpend.value) || 0;
-  const extra = S.source.value === 'generation' ? ' (+ the same number of free /generation lookups)' : '';
+  const extra = !IS_LL && S.source.value === 'generation' ? ' (+ the same number of free /generation lookups)' : '';
   const budget = Number(S.budget.value) || 50;
   const mins = Math.ceil((n * Number(S.delay.value)) / 60000);
   const warns = [];
-  if (nFree > budget) warns.push(`⚠ ${nFree} free requests is more than your daily free budget (${budget}). The run will stop when OpenRouter returns a daily-limit 429. Cached results are kept, so you can resume tomorrow.`);
+  const nUnpriced = IS_LL ? new Set(tasks.filter((t) => t.paid && !state.byId.get(t.id)?._priceKnown).map((t) => t.id)).size : 0;
+  if (nUnpriced) warns.push(`⚠ ${nUnpriced} selected model(s) have no price on the proxy, so their cost is not in the estimate. Spend is then capped only by LiteLLM's own spend tracking.`);
+  if (!IS_LL && nFree > budget) warns.push(`⚠ ${nFree} free requests is more than your daily free budget (${budget}). The run will stop when OpenRouter returns a daily-limit 429. Cached results are kept, so you can resume tomorrow.`);
   if (nPaid && cost > cap) warns.push(`⚠ Estimated paid cost (up to ${fmtUsd(cost)}) is above your max spend per run (${fmtUsd(cap)}). The run will stop once actual spend reaches the cap.`);
   const el = $('#estimate');
   el.className = 'estimate' + (warns.length ? ' warn' : '');
@@ -301,12 +423,12 @@ async function callModel(model, text, signal, variant = 0) {
   const m = state.byId.get(model);
   if (!m) throw new Fatal(`refusing unlisted model ${model}`);
   if (!isFree(m) && REQUEST_VARIANTS[variant].body.max_tokens > PAID_MAX_TOKENS) throw new Fatal(`refusing max_tokens > ${PAID_MAX_TOKENS} on paid model ${model}`);
-  const r = await fetch(`${API}/chat/completions`, {
+  const url = IS_LL ? `${llBase()}/v1/chat/completions` : `${OR_API}/chat/completions`;
+  const r = await fetch(url, {
     method: 'POST', signal,
-    headers: {
-      Authorization: `Bearer ${key()}`, 'Content-Type': 'application/json',
-      'HTTP-Referer': location.origin, 'X-Title': 'Tokenizer Fingerprinter',
-    },
+    headers: IS_LL
+      ? { Authorization: `Bearer ${key()}`, 'Content-Type': 'application/json' }
+      : { Authorization: `Bearer ${key()}`, 'Content-Type': 'application/json', 'HTTP-Referer': location.origin, 'X-Title': 'Tokenizer Fingerprinter' },
     body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], ...REQUEST_VARIANTS[variant].body }),
   });
   const rawText = await r.text().catch(() => '');
@@ -318,7 +440,7 @@ async function callModel(model, text, signal, variant = 0) {
 async function nativeTokens(genId, signal) {
   for (let i = 0; i < 6; i++) {
     await sleep(1200 + i * 800, signal);
-    const r = await fetch(`${API}/generation?id=${encodeURIComponent(genId)}`, { headers: { Authorization: `Bearer ${key()}` }, signal });
+    const r = await fetch(`${OR_API}/generation?id=${encodeURIComponent(genId)}`, { headers: { Authorization: `Bearer ${key()}` }, signal });
     if (r.ok) {
       const d = (await r.json()).data;
       if (Number.isFinite(d?.native_tokens_prompt)) return d.native_tokens_prompt;
@@ -366,7 +488,8 @@ async function probeOnce(id, probe, signal, status) {
     } catch (e) {
       if (e instanceof Fatal || e.name === 'AbortError') throw e;
       // fetch() itself failed: network, CORS, DNS, blocked by extension…
-      const rec = { at: Date.now(), probe: probe.id, http: 0, code: null, message: `Network error: ${e.message}`, provider: null, raw: '', variant: REQUEST_VARIANTS[variant].label, hint: 'Request never reached OpenRouter (offline, ad-blocker, or network policy).' };
+      const rec = { at: Date.now(), probe: probe.id, http: 0, code: null, message: `Network error: ${e.message}`, provider: null, raw: '', variant: REQUEST_VARIANTS[variant].label,
+        hint: IS_LL ? 'Request never reached the LiteLLM proxy: wrong URL, proxy down, or CORS not allowing this page\'s origin.' : 'Request never reached OpenRouter (offline, ad-blocker, or network policy).' };
       logError(id, rec);
       lastErr = rec;
       if (attempt < 2) { await sleep(3000, signal); continue; }
@@ -378,19 +501,21 @@ async function probeOnce(id, probe, signal, status) {
     if (code === 200 && Number.isFinite(pt) && pt > 0) {
       // Even if the completion failed, the prompt was tokenised and billed (at $0): usable.
       let t = pt;
-      if (S.source.value === 'generation' && body.id) {
+      if (!IS_LL && S.source.value === 'generation' && body.id) {
         const n = await nativeTokens(body.id, signal);
         if (n != null) t = n;
       }
       state.variant[id] = variant;
-      return { t, provider: body.provider || null, at: Date.now(), variant };
+      const cost = Number(headers.get('x-litellm-response-cost'));
+      const provider = body.provider || (IS_LL ? state.byId.get(id)?._provider : null) || null;
+      return { t, provider, at: Date.now(), variant, cost: Number.isFinite(cost) ? cost : null };
     }
     const md = err?.metadata || {};
-    const msg = err?.message || (code === 200 ? 'Response had no usage data' : `HTTP ${code}`);
+    const msg = (typeof err === 'string' ? err : err?.message) || errText(body) || (code === 200 ? 'Response had no usage data' : `HTTP ${code}`);
     const raw = clip(md.raw ?? (md.reasons ? { reasons: md.reasons, flagged_input: md.flagged_input } : '') ?? '');
     const rec = {
       at: Date.now(), probe: probe.id, http: code, code: err?.code ?? null, message: msg,
-      provider: md.provider_name || body?.provider || null, raw, variant: REQUEST_VARIANTS[variant].label,
+      provider: md.provider_name || body?.provider || (IS_LL ? state.byId.get(id)?._provider : null) || null, raw, variant: REQUEST_VARIANTS[variant].label,
       hint: errorHint(code, msg, raw || ''), id: body?.id || null,
     };
     logError(id, rec);
@@ -406,6 +531,7 @@ async function probeOnce(id, probe, signal, status) {
     }
     if (code === 402) throw new Fatal('402 Payment required. Stopping to protect the budget.');
     if (code === 401) throw new Fatal('401 Invalid API key.');
+    if (IS_LL && code === 400 && /budget|exceeded/i.test(msg)) throw new Fatal('LiteLLM budget exceeded: ' + msg);
     // Retrying with another request shape won't help for these.
     if (code === 404 || code === 403 || REGION_RE.test(msg + ' ' + raw) || /data policy|no endpoints found/i.test(msg)) break;
     // Parameter problems or opaque provider errors: try the next request shape.
@@ -431,7 +557,7 @@ function summarize(rec) {
 }
 
 async function run() {
-  if (!key()) { $('#status').textContent = 'Enter your OpenRouter key first.'; return; }
+  if (!key()) { $('#status').textContent = IS_LL ? 'Enter your LiteLLM proxy URL and key first.' : 'Enter your OpenRouter key first.'; return; }
   const tasks = pendingTasks();
   if (!tasks.length) { $('#status').textContent = 'Nothing to do. Everything selected is cached.'; renderResults(); return; }
   const ctl = new AbortController();
@@ -444,8 +570,11 @@ async function run() {
   if (est > cap && !confirm(`Estimated paid cost is up to ${fmtUsd(est)}, above your max spend per run (${fmtUsd(cap)}).\n\nThe run will stop once actual spend reaches the cap. Continue?`)) { stopUi(); return; }
   const hasPaid = tasks.some((x) => x.paid);
   let usage0 = null;
-  try { usage0 = Number((await keyInfo()).usage); } catch (e) { status('Key check failed: ' + e.message); stopUi(); return; }
-  const spent = async () => Number((await keyInfo()).usage) - usage0;
+  try { usage0 = (await keyInfo()).usage; } catch (e) { status('Key check failed: ' + e.message); stopUi(); return; }
+  // Spend = key usage delta when the backend reports it (OpenRouter, LiteLLM /key/info),
+  // else the sum of per-request costs (x-litellm-response-cost header, or our upper-bound estimate).
+  let localSpent = 0;
+  const spent = async () => (usage0 != null ? Math.max(Number((await keyInfo()).usage) - usage0, localSpent) : localSpent);
   let lastSpent = 0;
   const failedModels = new Map();
   let done = 0;
@@ -462,6 +591,7 @@ async function run() {
       try {
         const obs = await probeOnce(t.id, probeById.get(t.pid), ctl.signal, status);
         (state.cache[t.id] ||= {})[t.pid] = obs;
+        if (t.paid) localSpent += obs.cost ?? requestCost(state.byId.get(t.id), probeById.get(t.pid));
         delete state.errors[t.id];
       } catch (e) {
         if (e instanceof Fatal || e.name === 'AbortError') throw e;
@@ -487,7 +617,7 @@ async function run() {
   } catch (e) {
     status(e.name === 'AbortError' ? 'Stopped.' : '⛔ ' + e.message);
   } finally {
-    if (usage0 != null) {
+    {
       spent().then((d) => { if (d > 1e-9) $('#status').textContent += ` · spent ${fmtUsd(d)} this run`; }).catch(() => {});
     }
     stopUi(); saveCache(); renderResults(); renderEstimate();
@@ -518,7 +648,7 @@ function rebuildRef() {
   $('#refInfo').textContent = `${state.ref.references.length} reference tokenizers + ${nSig} signatures`;
   renderSignatures();
 }
-function saveUserSignatures() { store.set('signatures', state.sigUser); rebuildRef(); renderResults(); }
+function saveUserSignatures() { shared.set('signatures', state.sigUser); rebuildRef(); renderResults(); }
 /** Existing reference/signature with identical counts on every shared probe (≥ 8), if any. */
 function identicalReference(sig) {
   for (const r of state.refEff.references) {
@@ -565,8 +695,8 @@ const slug = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9.]+/g, '-').r
 /** Offer to save one model's (or a cluster's) observations as an observed signature. */
 function saveObservedSignature(modelIds) {
   const best = [...modelIds].sort((a, b) => Object.keys(observations(b)).length - Object.keys(observations(a)).length)[0];
-  const vendor = best.split('/')[0];
-  const exp = state.byId.get(best) ? expectedFamily(state.byId.get(best)) : null;
+  const vendor = (IS_LL ? state.byId.get(best)?._provider : null) || best.split('/')[0];
+  const exp = expFor(state.byId.get(best));
   const fam = prompt(`Family name for the tokenizer of:\n${modelIds.join('\n')}\n\nModels matching it will be reported under this name. Use the lab or model-family name, e.g. glm, mimo, kimi.`, exp || slug(vendor));
   if (!fam) return;
   const label = prompt('Display label:', `${fam} (observed from ${best})`) || fam;
@@ -601,8 +731,8 @@ async function signatureFromTokenizerJSON(tokenizerJSON, tokenizerConfig, { fami
   return sig;
 }
 const hfToken = $('#hfToken');
-hfToken.value = store.get('hfToken', '');
-hfToken.addEventListener('change', () => store.set('hfToken', hfToken.value.trim()));
+hfToken.value = shared.get('hfToken', '');
+hfToken.addEventListener('change', () => shared.set('hfToken', hfToken.value.trim()));
 $('#hfAdd').onclick = async () => {
   const repo = $('#hfRepo').value.trim().replace(/^https?:\/\/huggingface\.co\//, '').replace(/\/(tree|blob|resolve)\/.*$/, '');
   const st = $('#sigStatus');
@@ -655,7 +785,7 @@ function resultFor(id) {
   const obs = observations(id);
   const res = Object.keys(obs).length ? classify(obs, state.refEff) : null;
   const m = state.byId.get(id);
-  const exp = m ? expectedFamily(m) : null;
+  const exp = expFor(m);
   const log = state.errlog[id] || [];
   return { id, m, obs, res, exp, err: state.errors[id], lastErr: state.errors[id] ? log[log.length - 1] : null, log };
 }
@@ -675,17 +805,17 @@ function renderResults() {
     const agree = r.exp && best && ['match', 'likely', 'variant'].includes(r.res.verdict) ? (best.family === r.exp) : null;
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="mono">${esc(r.id)}${r.m?._stealth ? ' <span class="tag stealth">stealth?</span>' : ''}${r.m && !r.m._free ? ' <span class="tag paid">paid</span>' : ''}${r.err ? errorSnippet(r) : ''}</td>
+      <td class="mono">${esc(r.id)}${IS_LL && r.m ? ' ' + providerTag(r.m) : ''}${r.m?._stealth ? ' <span class="tag stealth">stealth?</span>' : ''}${r.m && !r.m._free ? ' <span class="tag paid">paid</span>' : ''}${r.err ? errorSnippet(r) : ''}</td>
       <td><span class="badge b-${v}">${v}</span>${r.res?.confidence ? `<div class="small muted">${Math.round(r.res.confidence * 100)}%</div>` : ''}</td>
       <td>${best ? (v === 'unknown' ? `<span class="muted">nearest:</span> ${esc(famName(best.family))}` : v === 'variant' ? `<span class="muted">variant of</span> <b>${esc(famName(best.family))}</b>` : `<b>${esc(famName(best.family))}</b>`) + (best.source === 'observed' ? ' <span class="tag src-observed">observed sig</span>' : '') + `<div class="small muted">err ${(best.relErr * 100).toFixed(1)}%, ${best.within1}/${best.n} probes ±1` +
         (r.res.runnerUp ? ` · next: ${esc(famName(r.res.runnerUp.family))} (Δ${r.res.runnerUp.score - best.score})` : '') + '</div>' : '—'}</td>
       <td>${best ? best.offset : '—'}</td>
-      <td>${esc(r.m?.architecture?.tokenizer || '—')}${r.exp ? ` → ${esc(famName(r.exp))}` : ''}${agree === true ? ' <span class="agree">✓</span>' : agree === false ? ' <span class="disagree">✗</span>' : ''}</td>
+      <td>${esc((IS_LL ? r.m?._upstream : r.m?.architecture?.tokenizer) || '—')}${r.exp ? ` → ${esc(famName(r.exp))}` : ''}${agree === true ? ' <span class="agree">✓</span>' : agree === false ? ' <span class="disagree">✗</span>' : ''}</td>
       <td>${Object.keys(r.obs).length}</td>`;
     tr.onclick = () => showDetail(r.id);
     tb.appendChild(tr);
   }
-  if (!rows.length) tb.innerHTML = '<tr><td colspan="6" class="muted">No results yet. Select free models and press Run.</td></tr>';
+  if (!rows.length) tb.innerHTML = `<tr><td colspan="6" class="muted">No results yet. Select ${IS_LL ? '' : 'free '}models and press Run.</td></tr>`;
 
   // Calibration: how often does the classifier agree with known families?
   // Calibration: only models whose expected family has a reference or signature.
@@ -712,14 +842,14 @@ function renderClusters(rows) {
   $('#clusterInfo').textContent = `${groups.length} type(s) from ${cand.length} model(s)`;
   $('#clusters').innerHTML = '';
   groups.forEach((g, i) => {
-    const vendors = [...new Set(g.map((x) => x.id.split('/')[0]))];
+    const vendors = [...new Set(g.map((x) => (IS_LL ? x.r.m?._provider : null) || x.id.split('/')[0]))];
     const near = g[0].r.res.best;
     const nProbes = Math.max(...g.map((x) => Object.keys(x.obs).length));
     const div = document.createElement('div');
     div.className = 'cluster';
     div.innerHTML = `<div class="row wrap"><b>Type ${i + 1}</b>
         <span class="tag">${g.length} model${g.length > 1 ? 's' : ''}</span>
-        <span class="tag">labs: ${esc(vendors.join(', '))}</span>
+        <span class="tag">${IS_LL ? 'providers' : 'labs'}: ${esc(vendors.join(', '))}</span>
         <span class="tag">${g[0].r.res.verdict === 'variant' ? 'variant of' : 'nearest'} ${esc(famName(near.family))} (${(near.relErr * 100).toFixed(1)}% err)</span></div>
       <div class="members">${g.map((x) => esc(x.id)).join('<br>')}</div>
       ${g.length > 1 ? '<div class="small muted">These models agree with each other probe-by-probe, so they share a tokenizer that is not in the reference set.</div>' : ''}
@@ -782,7 +912,7 @@ function showDetail(id, quiet) {
   const providers = [...new Set(Object.values(state.cache[id] || {}).map((o) => o.provider).filter(Boolean))];
   $('#detail').innerHTML = `
     <p class="small">${r.m?.description ? esc(r.m.description.slice(0, 400)) + (r.m.description.length > 400 ? '…' : '') : ''}</p>
-    <p class="small muted">Provider(s) that served the requests: ${esc(providers.join(', ') || 'n/a')}. Stealth signals: ${esc(r.m?._sig?.join('; ') || 'none')}.</p>
+    <p class="small muted">${IS_LL ? `LiteLLM provider: ${esc((r.m?._providers || []).join(', ') || 'n/a')} · upstream: <code>${esc((r.m?._upstreams || []).join(', ') || 'n/a')}</code>.` : `Provider(s) that served the requests: ${esc(providers.join(', ') || 'n/a')}. Stealth signals: ${esc(r.m?._sig?.join('; ') || 'none')}.`}</p>
     <div class="table-wrap"><table class="detail-table">
       <thead><tr><th>probe</th><th>observed</th>${top.map((t) => `<th title="${esc(t.label)}">${esc(t.source === 'observed' ? t.family + '*' : t.id)}<br><span class="muted">ovh ${t.offset}</span></th>`).join('')}</tr></thead>
       <tbody>${probes.map((p) => {
@@ -808,18 +938,19 @@ function download(name, text, type) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 $('#exportJson').onclick = () => download('fingerprints.json', JSON.stringify(allResults().map((r) => ({
-  model: r.id, declared_tokenizer: r.m?.architecture?.tokenizer ?? null, expected_family: r.exp,
+  model: r.id, backend: BACKEND, provider: IS_LL ? r.m?._provider ?? null : null, upstream: r.m?._upstream ?? null,
+  declared_tokenizer: IS_LL ? null : r.m?.architecture?.tokenizer ?? null, expected_family: r.exp,
   verdict: r.res?.verdict ?? null, family: r.res?.best?.family ?? null, reference: r.res?.best?.id ?? null,
   rel_err: r.res?.best?.relErr ?? null, overhead: r.res?.best?.offset ?? null,
   runner_up: r.res?.runnerUp?.family ?? null, confidence: r.res?.confidence ?? null,
   observations: r.obs, error: r.err ?? null, error_log: r.log, stealth_signals: r.m?._sig ?? [],
 })), null, 2), 'application/json');
 $('#exportCsv').onclick = () => {
-  const head = ['model', 'verdict', 'family', 'reference', 'rel_err', 'overhead', 'runner_up', 'declared_tokenizer', 'expected_family', 'n_probes', ...state.ref.probes.map((p) => p.id)];
+  const head = ['model', 'provider', 'verdict', 'family', 'reference', 'rel_err', 'overhead', 'runner_up', 'declared_tokenizer', 'expected_family', 'n_probes', ...state.ref.probes.map((p) => p.id)];
   const lines = [head.join(',')];
   for (const r of allResults()) {
     const b = r.res?.best;
-    lines.push([r.id, r.res?.verdict, b?.family, b?.id, b?.relErr?.toFixed(4), b?.offset, r.res?.runnerUp?.family,
+    lines.push([r.id, IS_LL ? r.m?._provider : vendorOf({ id: r.id }), r.res?.verdict, b?.family, b?.id, b?.relErr?.toFixed(4), b?.offset, r.res?.runnerUp?.family,
       r.m?.architecture?.tokenizer, r.exp, Object.keys(r.obs).length, ...state.ref.probes.map((p) => r.obs[p.id] ?? '')]
       .map((x) => `"${String(x ?? '').replace(/"/g, '""')}"`).join(','));
   }

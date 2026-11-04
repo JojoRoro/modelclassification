@@ -17,6 +17,19 @@ Then open <http://localhost:5173>. Any static host also works, because the app i
 3. Press **Run fingerprint**. Results are cached per model and probe, so re-runs and re-scoring are free.
 4. Models that match no reference appear under **New tokenizer types**, grouped when they share a tokenizer. Save a group as a **signature**, or add an exact signature from a HuggingFace `tokenizer.json`, and future models with that tokenizer are recognised. See [RESEARCH.md](RESEARCH.md#detecting-new-model-types-signatures).
 
+## LiteLLM proxy backend
+
+Pick **LiteLLM proxy (custom URL)** in the *Backend* dropdown to fingerprint the models behind your own [LiteLLM](https://docs.litellm.ai/) proxy instead of OpenRouter.
+
+1. Enter the proxy URL (with or without `/v1`) and a LiteLLM key, then press **Check**. URL and key stay in your browser and are sent only to that URL.
+2. Every model id the key can use is listed, from `/v1/models` (wildcard routes expanded) enriched with `/model/info`. Each row shows its **provider** (`litellm_provider`, e.g. `openai`, `anthropic`, `bedrock`, `ollama`), the upstream model and the price the proxy reports.
+3. Filter by search text (matches id, provider and upstream model), **Provider** chips, **Mode** chips (chat, embedding, …), *Chat models*, *Free only* (price 0, e.g. self-hosted) or *Selected only*. **1 per provider** picks one model per provider.
+4. Results, exports and clusters show the provider too. Selection, cache and settings are kept separately per backend; signatures are shared.
+
+Spend: the run reads `spend` from `/key/info` before and during the run, and also sums each response's `x-litellm-response-cost` header (or the upper-bound estimate). The larger of the two is checked against *Max spend per run*. Models with no price on the proxy are marked **price unknown** and are not in the estimate. The proxy must allow CORS from the page's origin (LiteLLM allows all origins by default).
+
+Caveat: LiteLLM passes through the provider's `usage.prompt_tokens`. If a provider returns no usage, LiteLLM counts tokens itself (usually with tiktoken), and such a model will look like an OpenAI tokenizer.
+
 ## Costs and budget safety
 
 - **Free models** (every price field `0`) cost nothing and are tagged `free`.

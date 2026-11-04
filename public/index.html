@@ -14,7 +14,18 @@
     <p class="sub">Identify which tokenizer family a model uses (and so, likely, who built it) from the prompt-token counts its API reports. Free models cost nothing; paid models are marked and capped by a per-run spend limit.</p>
   </div>
   <div class="keybox">
-    <label for="apiKey">OpenRouter key</label>
+    <div class="row backend-row">
+      <label for="backend">Backend</label>
+      <select id="backend">
+        <option value="openrouter">OpenRouter</option>
+        <option value="litellm">LiteLLM proxy (custom URL)</option>
+      </select>
+    </div>
+    <div id="urlRow" hidden>
+      <label for="baseUrl">LiteLLM proxy URL</label>
+      <input id="baseUrl" type="text" placeholder="https://litellm.example.com" autocomplete="off" spellcheck="false">
+    </div>
+    <label for="apiKey" id="keyLabel">OpenRouter key</label>
     <div class="row">
       <input id="apiKey" type="password" placeholder="sk-or-v1-…" autocomplete="off" spellcheck="false">
       <button id="toggleKey" class="ghost" type="button" title="Show/hide">👁</button>
@@ -36,7 +47,7 @@
       <input id="q" type="search" placeholder="Search id, name, description…">
       <div class="toggles">
         <label class="chk"><input type="checkbox" id="fFree" checked> Free only</label>
-        <label class="chk"><input type="checkbox" id="fStealth"> Stealth candidates</label>
+        <label class="chk or-only"><input type="checkbox" id="fStealth"> Stealth candidates</label>
         <label class="chk"><input type="checkbox" id="fSelected"> Selected only</label>
         <label class="chk"><input type="checkbox" id="fText" checked> Text output</label>
       </div>
@@ -50,16 +61,16 @@
         <label class="small">Sort
           <select id="sort">
             <option value="new">newest</option><option value="name">name</option>
-            <option value="vendor">vendor</option><option value="ctx">context</option>
+            <option value="vendor">vendor / provider</option><option value="ctx">context</option>
           </select>
         </label>
       </div>
       <details class="facet" open>
-        <summary>Vendor <span class="muted small" id="vendorCount"></span></summary>
+        <summary><span id="facetALabel">Vendor</span> <span class="muted small" id="vendorCount"></span></summary>
         <div class="chips" id="vendorChips"></div>
       </details>
       <details class="facet">
-        <summary>Declared tokenizer <span class="muted small" id="tokCount"></span></summary>
+        <summary><span id="facetBLabel">Declared tokenizer</span> <span class="muted small" id="tokCount"></span></summary>
         <div class="chips" id="tokChips"></div>
       </details>
     </div>
@@ -67,8 +78,8 @@
     <div class="mass">
       <button data-mass="allFree" class="primary" type="button">Select all free</button>
       <button data-mass="visible" type="button">Select visible</button>
-      <button data-mass="stealth" type="button">Select stealth</button>
-      <button data-mass="perVendor" type="button">1 per vendor</button>
+      <button data-mass="stealth" class="or-only" type="button">Select stealth</button>
+      <button data-mass="perVendor" type="button" id="perVendorBtn">1 per vendor</button>
       <button data-mass="invert" type="button">Invert visible</button>
       <button data-mass="none" class="ghost" type="button">Clear</button>
     </div>
@@ -97,13 +108,13 @@
           <label class="small">Token source
             <select id="tokenSource">
               <option value="usage">usage.prompt_tokens (response)</option>
-              <option value="generation">native_tokens_prompt (/generation, +1 free call)</option>
+              <option value="generation" class="or-only">native_tokens_prompt (/generation, +1 free call, OpenRouter only)</option>
             </select>
           </label>
           <label class="small">Delay between requests (ms)
             <input id="delay" type="number" min="500" step="100" value="3200">
           </label>
-          <label class="small">Daily free-request budget
+          <label class="small or-only">Daily free-request budget
             <input id="dailyBudget" type="number" min="1" value="50">
           </label>
           <label class="small">Max spend per run ($, paid models)

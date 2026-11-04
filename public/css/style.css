@@ -110,3 +110,10 @@ h3.small { margin: 12px 0 6px; }
 .tag.src-observed { background: var(--warn-bg); color: var(--warn); }
 .cluster { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
 .cluster .members { font-family: var(--mono); font-size: 12px; margin: 4px 0; }
+.backend-row { margin-bottom: 6px; }
+.backend-row label { margin-right: 4px; }
+#urlRow { display: grid; gap: 3px; margin-bottom: 6px; }
+#urlRow[hidden] { display: none; }
+#baseUrl { font-family: var(--mono); font-size: 12px; }
+body.ll .or-only { display: none; }
+.tag.prov { background: var(--chip-on); color: var(--fg); }
